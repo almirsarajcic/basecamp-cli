@@ -111,8 +111,8 @@ func newSearchMetadataCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "metadata",
 		Aliases: []string{"types"},
-		Short:   "Show available search scopes",
-		Long:    "Display available projects for search scope filtering.",
+		Short:   "Show available search filters",
+		Long:    "Display the available recording-type and file-type filters for scoping a search.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app := appctx.FromContext(cmd.Context())
 			return runSearchMetadata(cmd, app)
@@ -202,14 +202,15 @@ func runSearchMetadata(cmd *cobra.Command, app *appctx.App) error {
 	}
 
 	// Handle empty response
-	if metadata == nil || len(metadata.Projects) == 0 {
+	if metadata == nil || (len(metadata.RecordingSearchTypes) == 0 && len(metadata.FileSearchTypes) == 0) {
 		return output.ErrUsageHint(
 			"Search metadata not available",
-			"No projects available for search filtering",
+			"No search filters available",
 		)
 	}
 
-	summary := fmt.Sprintf("Available projects: %d", len(metadata.Projects))
+	summary := fmt.Sprintf("Search filters: %d recording types, %d file types",
+		len(metadata.RecordingSearchTypes), len(metadata.FileSearchTypes))
 
 	return app.OK(metadata,
 		output.WithSummary(summary),
