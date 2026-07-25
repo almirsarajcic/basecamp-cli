@@ -1942,3 +1942,485 @@ func TestCardsColumnColorURLBucketBeatsFlag(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, tr.mutatePath, "/buckets/123/card_tables/columns/789/color.json")
 }
+
+// --- Wormholes (cross-project card move, #342) ---
+
+func wormholePtr[T any](v T) *T { return &v }
+
+// mockWormholeTransport serves the dock/card/card-table fixtures the wormhole
+// commands need and records the last mutating (POST/PUT/DELETE) request.
+//
+//   - Card 456 lives in project (bucket) 123, parent column 777, on card table 555.
+//   - destinationURL controls the single wormhole's destination column.
+//   - linked controls whether that wormhole is linked.
+//   - secondTable adds a board 666 (columns [888], no wormholes) so tests can
+//     exercise an explicit --card-table that doesn't contain the card.
+type mockWormholeTransport struct {
+	destinationURL string
+	linked         *bool
+	secondTable    bool
+	cardNoParent   bool // card 456 comes back without a parent column
+	method         string
+	path           string
+	body           []byte
+}
+
+func (t *mockWormholeTransport) wormholeJSON() string {
+	dest := t.destinationURL
+	if dest == "" {
+		dest = "https://3.basecampapi.com/99999/buckets/999/card_tables/columns/888.json"
+	}
+	linked := true
+	if t.linked != nil {
+		linked = *t.linked
+	}
+	return fmt.Sprintf(`{"id":111,"status":"active","title":"Anniversary › Card Table › Triage",`+
+		`"type":"Kanban::Wormhole","color":null,"linked":%t,"destination_url":"%s",`+
+		`"parent":{"id":555,"title":"Board","type":"Kanban::Board"}}`, linked, dest)
+}
+
+func (t *mockWormholeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	header := make(http.Header)
+	header.Set("Content-Type", "application/json")
+
+	if req.Method == "GET" {
+		var body string
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/projects.json"):
+			body = `[{"id": 123, "name": "Test Project"}]`
+		case strings.Contains(req.URL.Path, "/projects/123"):
+			if t.secondTable {
+				body = `{"id": 123, "dock": [{"name": "kanban_board", "id": 555, "title": "Board"},{"name": "kanban_board", "id": 666, "title": "Other"}]}`
+			} else {
+				body = `{"id": 123, "dock": [{"name": "kanban_board", "id": 555, "title": "Board"}]}`
+			}
+		case strings.Contains(req.URL.Path, "/card_tables/cards/456"):
+			if t.cardNoParent {
+				body = `{"id": 456, "title": "Test Card", "bucket": {"id": 123, "name": "Test Project", "type": "Project"}}`
+			} else {
+				body = `{"id": 456, "title": "Test Card", "bucket": {"id": 123, "name": "Test Project", "type": "Project"}, "parent": {"id": 777, "title": "Developing", "type": "Kanban::Column"}}`
+			}
+		case strings.Contains(req.URL.Path, "/card_tables/555"):
+			body = `{"id": 555, "lists": [{"id": 777, "title": "Developing", "position": 1}], "wormholes": [` + t.wormholeJSON() + `]}`
+		case strings.Contains(req.URL.Path, "/card_tables/666"):
+			// A real wormhole (222) that lives on a sibling board, not the card's table.
+			body = `{"id": 666, "lists": [{"id": 888, "title": "Elsewhere", "position": 1}], "wormholes": [{"id":222,"status":"active","title":"Sibling › Board › Col","type":"Kanban::Wormhole","color":null,"linked":true,"destination_url":"https://3.basecampapi.com/99999/buckets/999/card_tables/columns/321.json"}]}`
+		default:
+			body = `{}`
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: header}, nil
+	}
+
+	t.method = req.Method
+	t.path = req.URL.Path
+	if req.Body != nil {
+		b, _ := io.ReadAll(req.Body)
+		t.body = b
+		req.Body.Close()
+	}
+
+	switch req.Method {
+	case "POST":
+		if strings.Contains(req.URL.Path, "/moves.json") {
+			return &http.Response{StatusCode: 204, Body: io.NopCloser(strings.NewReader("")), Header: header}, nil
+		}
+		return &http.Response{StatusCode: 201, Body: io.NopCloser(strings.NewReader(t.wormholeJSON())), Header: header}, nil
+	case "PUT":
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(t.wormholeJSON())), Header: header}, nil
+	case "DELETE":
+		return &http.Response{StatusCode: 204, Body: io.NopCloser(strings.NewReader("")), Header: header}, nil
+	}
+	return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+}
+
+// wormholeMoveError runs `cards move <card> --to-wormhole ...`, asserts it failed
+// with an *output.Error, and asserts no mutating request was issued — a rejected
+// teleport must never touch the server, since the move is irreversible.
+func wormholeMoveError(t *testing.T, transport *mockWormholeTransport, project string, args ...string) *output.Error {
+	t.Helper()
+	app, _ := newTestAppWithTransport(t, transport)
+	cardTable := ""
+	cmd := newCardsMoveCmd(&project, &cardTable)
+	err := executeCommand(cmd, app, args...)
+	var e *output.Error
+	require.True(t, errors.As(err, &e), "expected *output.Error, got %T: %v", err, err)
+	assert.Empty(t, transport.method, "a rejected wormhole move must not issue a mutating request")
+	return e
+}
+
+// TestCardsMoveToWormholeByID verifies a numeric --to-wormhole is still validated
+// against the card's own source table (fail-closed) and moved through the
+// wormhole's id.
+func TestCardsMoveToWormholeByID(t *testing.T) {
+	transport := &mockWormholeTransport{}
+	app, buf := newTestAppWithTransport(t, transport)
+
+	project := ""
+	cardTable := ""
+	cmd := newCardsMoveCmd(&project, &cardTable)
+
+	err := executeCommand(cmd, app, "456", "--to-wormhole", "111")
+	require.NoError(t, err)
+
+	assert.Equal(t, "POST", transport.method)
+	assert.Contains(t, transport.path, "/card_tables/cards/456/moves.json")
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(transport.body, &body))
+	assert.Equal(t, float64(111), body["column_id"])
+
+	// Output reports source_id (not id) and status teleporting, and carries no
+	// same-id "view card" breadcrumb (that id is about to 404).
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &envelope))
+	assert.Equal(t, "456", envelope.Data["source_id"])
+	assert.Equal(t, "teleporting", envelope.Data["status"])
+	assert.NotContains(t, envelope.Data, "id")
+	assert.NotContains(t, buf.String(), "cards show 456")
+}
+
+// TestCardsMoveToWormholeByDestinationURL verifies a destination-column URL is
+// matched against the card's source table wormholes[] and moved through the
+// matching wormhole's id (111), not the destination column id (888). The
+// breadcrumb pins the resolved --card-table.
+func TestCardsMoveToWormholeByDestinationURL(t *testing.T) {
+	transport := &mockWormholeTransport{}
+	app, _ := newTestAppWithTransport(t, transport)
+
+	project := ""
+	cardTable := ""
+	cmd := newCardsMoveCmd(&project, &cardTable)
+
+	url := "https://3.basecamp.com/99999/buckets/999/card_tables/columns/888"
+	err := executeCommand(cmd, app, "456", "--to-wormhole", url)
+	require.NoError(t, err)
+
+	assert.Contains(t, transport.path, "/card_tables/cards/456/moves.json")
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(transport.body, &body))
+	assert.Equal(t, float64(111), body["column_id"])
+}
+
+// TestCardsMoveToWormholeSiblingBoardRejected verifies that a real wormhole (222)
+// which exists on a sibling board — not the card's own card table — is rejected
+// (fail-closed) with no move issued. The server would otherwise honor it, since
+// it resolves column_id against the whole project bucket.
+func TestCardsMoveToWormholeSiblingBoardRejected(t *testing.T) {
+	e := wormholeMoveError(t, &mockWormholeTransport{secondTable: true}, "", "456", "--to-wormhole", "222")
+	assert.Contains(t, e.Message, "Wormhole 222 is not on this card's card table")
+	assert.Contains(t, e.Hint, "#111")
+}
+
+// TestCardsMoveToWormholeUnlinkedRejected verifies an unlinked wormhole is
+// rejected before any move.
+func TestCardsMoveToWormholeUnlinkedRejected(t *testing.T) {
+	e := wormholeMoveError(t, &mockWormholeTransport{linked: wormholePtr(false)}, "", "456", "--to-wormhole", "111")
+	assert.Contains(t, e.Message, "unlinked")
+	// The fix-it hint must be copy/pasteable — include --in with the source project.
+	assert.Contains(t, e.Hint, "--in 123")
+}
+
+// TestCardsMoveToWormholeNoMatch verifies a destination-column URL that no
+// wormhole targets errors with a hint listing the reachable wormholes.
+func TestCardsMoveToWormholeNoMatch(t *testing.T) {
+	transport := &mockWormholeTransport{destinationURL: "https://3.basecampapi.com/99999/buckets/999/card_tables/columns/222.json"}
+	url := "https://3.basecamp.com/99999/buckets/999/card_tables/columns/888"
+	e := wormholeMoveError(t, transport, "", "456", "--to-wormhole", url)
+	assert.Contains(t, e.Message, "column 888")
+	assert.Contains(t, e.Hint, "#111")
+}
+
+// TestCardsMoveToWormholeProjectConflict verifies an explicit --in that
+// contradicts the card's own project is rejected.
+func TestCardsMoveToWormholeProjectConflict(t *testing.T) {
+	e := wormholeMoveError(t, &mockWormholeTransport{}, "999", "456", "--to-wormhole", "111")
+	assert.Contains(t, e.Message, "points at project 999")
+}
+
+// TestCardsMoveToWormholeTableConflict verifies an explicit --card-table that
+// doesn't contain the card is rejected.
+func TestCardsMoveToWormholeTableConflict(t *testing.T) {
+	transport := &mockWormholeTransport{secondTable: true}
+	app, _ := newTestAppWithTransport(t, transport)
+	project := ""
+	cardTable := "666"
+	cmd := newCardsMoveCmd(&project, &cardTable)
+	err := executeCommand(cmd, app, "456", "--to-wormhole", "111")
+	var e *output.Error
+	require.True(t, errors.As(err, &e), "expected *output.Error, got %T: %v", err, err)
+	assert.Contains(t, e.Message, "not on the specified card table")
+	assert.Empty(t, transport.method, "a rejected wormhole move must not issue a mutating request")
+}
+
+// TestCardsMoveToWormholeRejectsNonColumnURL verifies a non-column Basecamp URL
+// is rejected rather than having its trailing id accepted.
+func TestCardsMoveToWormholeRejectsNonColumnURL(t *testing.T) {
+	cardURL := "https://3.basecamp.com/99999/buckets/999/card_tables/cards/456"
+	e := wormholeMoveError(t, &mockWormholeTransport{}, "", "456", "--to-wormhole", cardURL)
+	assert.Contains(t, e.Message, "Invalid destination column")
+}
+
+// TestCardsMoveToWormholeRejectsNonPositiveID verifies a zero/negative wormhole
+// id is rejected.
+func TestCardsMoveToWormholeRejectsNonPositiveID(t *testing.T) {
+	e := wormholeMoveError(t, &mockWormholeTransport{}, "", "456", "--to-wormhole", "0")
+	assert.Contains(t, e.Message, "positive wormhole ID")
+}
+
+// TestCardsMoveToWormholeMutuallyExclusive verifies --to-wormhole rejects each of
+// --to, --on-hold, and --position.
+func TestCardsMoveToWormholeMutuallyExclusive(t *testing.T) {
+	for _, extra := range [][]string{
+		{"--to", "Done"},
+		{"--on-hold"},
+		{"--position", "2"},
+	} {
+		args := append([]string{"456", "--to-wormhole", "111"}, extra...)
+		e := wormholeMoveError(t, &mockWormholeTransport{}, "", args...)
+		assert.Contains(t, e.Message, "--to-wormhole cannot be combined")
+	}
+}
+
+// TestCardsWormholesList verifies list reads wormholes[] from the card table.
+func TestCardsWormholesList(t *testing.T) {
+	transport := &mockWormholeTransport{}
+	app, buf := newTestAppWithTransport(t, transport)
+
+	project := ""
+	cardTable := ""
+	err := executeCommand(newCardsWormholesListCmd(&project, &cardTable), app)
+	require.NoError(t, err)
+
+	var envelope struct {
+		Data []map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &envelope))
+	require.Len(t, envelope.Data, 1)
+	assert.Equal(t, float64(111), envelope.Data[0]["id"])
+	assert.Contains(t, buf.String(), "1 wormholes")
+}
+
+// TestCardsWormholesCreate verifies create POSTs destination_recording_id to the
+// board-scoped wormholes endpoint.
+func TestCardsWormholesCreate(t *testing.T) {
+	transport := &mockWormholeTransport{}
+	app, _ := newTestAppWithTransport(t, transport)
+
+	project := ""
+	cardTable := ""
+	err := executeCommand(newCardsWormholesCreateCmd(&project, &cardTable), app, "--to-column", "888")
+	require.NoError(t, err)
+
+	assert.Equal(t, "POST", transport.method)
+	assert.Contains(t, transport.path, "/buckets/123/card_tables/555/wormholes.json")
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(transport.body, &body))
+	assert.Equal(t, float64(888), body["destination_recording_id"])
+}
+
+// TestCardsWormholesCreateFromColumnURL verifies --to-column accepts a column URL.
+func TestCardsWormholesCreateFromColumnURL(t *testing.T) {
+	transport := &mockWormholeTransport{}
+	app, _ := newTestAppWithTransport(t, transport)
+
+	project := ""
+	cardTable := ""
+	url := "https://3.basecamp.com/99999/buckets/999/card_tables/columns/888"
+	err := executeCommand(newCardsWormholesCreateCmd(&project, &cardTable), app, "--to-column", url)
+	require.NoError(t, err)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(transport.body, &body))
+	assert.Equal(t, float64(888), body["destination_recording_id"])
+}
+
+// TestCardsWormholesCreateRejectsNonColumnURL verifies create rejects a
+// non-column Basecamp URL for --to-column.
+func TestCardsWormholesCreateRejectsNonColumnURL(t *testing.T) {
+	transport := &mockWormholeTransport{}
+	app, _ := newTestAppWithTransport(t, transport)
+
+	project := ""
+	cardTable := ""
+	cardURL := "https://3.basecamp.com/99999/buckets/999/card_tables/cards/456"
+	err := executeCommand(newCardsWormholesCreateCmd(&project, &cardTable), app, "--to-column", cardURL)
+	var e *output.Error
+	require.True(t, errors.As(err, &e), "expected *output.Error, got %T: %v", err, err)
+	assert.Contains(t, e.Message, "Invalid destination column")
+}
+
+// TestCardsWormholesUpdate verifies update PUTs to the wormhole-scoped endpoint.
+func TestCardsWormholesUpdate(t *testing.T) {
+	transport := &mockWormholeTransport{}
+	app, _ := newTestAppWithTransport(t, transport)
+
+	project := ""
+	err := executeCommand(newCardsWormholesUpdateCmd(&project), app, "111", "--to-column", "888")
+	require.NoError(t, err)
+
+	assert.Equal(t, "PUT", transport.method)
+	// NB: the merged SDK's generated Update/Delete routes omit the .json suffix
+	// that create and the bc-api docs use; assert the path the SDK actually issues.
+	assert.Contains(t, transport.path, "/buckets/123/card_tables/wormholes/111")
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(transport.body, &body))
+	assert.Equal(t, float64(888), body["destination_recording_id"])
+}
+
+// TestCardsWormholesDelete verifies delete DELETEs the wormhole-scoped endpoint.
+func TestCardsWormholesDelete(t *testing.T) {
+	transport := &mockWormholeTransport{}
+	app, _ := newTestAppWithTransport(t, transport)
+
+	project := ""
+	err := executeCommand(newCardsWormholesDeleteCmd(&project), app, "111")
+	require.NoError(t, err)
+
+	assert.Equal(t, "DELETE", transport.method)
+	assert.Contains(t, transport.path, "/buckets/123/card_tables/wormholes/111")
+}
+
+// TestFindWormholeByDestinationColumn verifies destination-column matching skips
+// unlinked wormholes and matches by the destination_url's column id.
+func TestFindWormholeByDestinationColumn(t *testing.T) {
+	wormholes := []basecamp.Wormhole{
+		{ID: 100, DestinationURL: nil}, // unlinked — never matches
+		{ID: 111, DestinationURL: wormholePtr("https://3.basecampapi.com/99999/buckets/999/card_tables/columns/888.json")},
+	}
+
+	assert.Equal(t, int64(111), findWormholeByDestinationColumn(wormholes, 888).ID)
+	assert.Nil(t, findWormholeByDestinationColumn(wormholes, 999))
+}
+
+// TestWormholeMoveBreadcrumbs verifies the move breadcrumb pins the resolved
+// --card-table (multi-table safety) and offers no same-id view action.
+func TestWormholeMoveBreadcrumbs(t *testing.T) {
+	crumbs := wormholeMoveBreadcrumbs("123", "555")
+	require.Len(t, crumbs, 1)
+	assert.Contains(t, crumbs[0].Cmd, "--in 123")
+	assert.Contains(t, crumbs[0].Cmd, "--card-table 555")
+	assert.NotContains(t, crumbs[0].Cmd, "cards show")
+}
+
+// TestWormholeListBreadcrumb verifies the list follow-up pins --card-table from
+// the wormhole's parent, and omits it when the parent is unknown.
+func TestWormholeListBreadcrumb(t *testing.T) {
+	withParent := wormholeListBreadcrumb(123, &basecamp.Wormhole{ID: 111, Parent: &basecamp.Parent{ID: 555}})
+	assert.Contains(t, withParent.Cmd, "--in 123")
+	assert.Contains(t, withParent.Cmd, "--card-table 555")
+
+	noParent := wormholeListBreadcrumb(123, &basecamp.Wormhole{ID: 111})
+	assert.Contains(t, noParent.Cmd, "--in 123")
+	assert.NotContains(t, noParent.Cmd, "--card-table")
+}
+
+// TestParseColumnID covers numeric IDs, column URLs, and rejections.
+func TestParseColumnID(t *testing.T) {
+	id, err := parseColumnID("888")
+	require.NoError(t, err)
+	assert.Equal(t, int64(888), id)
+
+	id, err = parseColumnID("https://3.basecamp.com/99999/buckets/999/card_tables/columns/888")
+	require.NoError(t, err)
+	assert.Equal(t, int64(888), id)
+
+	_, err = parseColumnID("0")
+	require.Error(t, err)
+
+	_, err = parseColumnID("-4")
+	require.Error(t, err)
+
+	// A card URL is not a column URL — reject rather than accept its trailing id.
+	_, err = parseColumnID("https://3.basecamp.com/99999/buckets/999/card_tables/cards/456")
+	require.Error(t, err)
+}
+
+// TestCardsMoveToWormholeRootProjectConflict verifies a root-level --project
+// (which lands in app.Flags.Project, not the card command's own flag) that
+// contradicts the card's project is still rejected before the destructive move.
+func TestCardsMoveToWormholeRootProjectConflict(t *testing.T) {
+	transport := &mockWormholeTransport{}
+	app, _ := newTestAppWithTransport(t, transport)
+	app.Flags.Project = "999" // e.g. `basecamp --project 999 cards move …`
+
+	project := ""
+	cardTable := ""
+	cmd := newCardsMoveCmd(&project, &cardTable)
+	err := executeCommand(cmd, app, "456", "--to-wormhole", "111")
+
+	var e *output.Error
+	require.True(t, errors.As(err, &e), "expected *output.Error, got %T: %v", err, err)
+	assert.Contains(t, e.Message, "points at project 999")
+	assert.Empty(t, transport.method, "a rejected wormhole move must not issue a mutating request")
+}
+
+// TestCardsMoveToWormholeEmptyValue verifies --to-wormhole= (present but empty)
+// errors explicitly instead of falling back to the normal move path.
+func TestCardsMoveToWormholeEmptyValue(t *testing.T) {
+	e := wormholeMoveError(t, &mockWormholeTransport{}, "", "456", "--to-wormhole=")
+	assert.Contains(t, e.Message, "requires a wormhole ID or destination-column URL")
+}
+
+// TestCardsWormholesUpdateRejectsNonPositiveID verifies update rejects id <= 0.
+func TestCardsWormholesUpdateRejectsNonPositiveID(t *testing.T) {
+	app, _ := newTestAppWithTransport(t, &mockWormholeTransport{})
+	project := ""
+	err := executeCommand(newCardsWormholesUpdateCmd(&project), app, "0", "--to-column", "888")
+	var e *output.Error
+	require.True(t, errors.As(err, &e), "expected *output.Error, got %T: %v", err, err)
+	assert.Contains(t, e.Message, "Invalid wormhole ID")
+}
+
+// TestCardsWormholesDeleteRejectsNonPositiveID verifies delete rejects id <= 0.
+func TestCardsWormholesDeleteRejectsNonPositiveID(t *testing.T) {
+	app, _ := newTestAppWithTransport(t, &mockWormholeTransport{})
+	project := ""
+	err := executeCommand(newCardsWormholesDeleteCmd(&project), app, "0")
+	var e *output.Error
+	require.True(t, errors.As(err, &e), "expected *output.Error, got %T: %v", err, err)
+	assert.Contains(t, e.Message, "Invalid wormhole ID")
+}
+
+// TestCardsMoveToWormholeUnverifiableTableRejected verifies that when the card's
+// parent column is unavailable (so its table placement can't be confirmed) the
+// teleport fails closed at the command level with no mutation.
+func TestCardsMoveToWormholeUnverifiableTableRejected(t *testing.T) {
+	e := wormholeMoveError(t, &mockWormholeTransport{cardNoParent: true}, "", "456", "--to-wormhole", "111")
+	assert.Contains(t, e.Message, "Could not verify which card table")
+}
+
+// TestCardsMoveToWormholeURLProjectConflict verifies a project encoded in the
+// card URL that contradicts the card's own project is rejected (urlProjectID
+// path, distinct from the --in flag and root --project paths).
+func TestCardsMoveToWormholeURLProjectConflict(t *testing.T) {
+	cardURL := "https://3.basecamp.com/99999/buckets/777/card_tables/cards/456"
+	e := wormholeMoveError(t, &mockWormholeTransport{}, "", cardURL, "--to-wormhole", "111")
+	assert.Contains(t, e.Message, "the card URL")
+	assert.Contains(t, e.Message, "777")
+}
+
+// TestCardsWormholesUpdateBreadcrumbPinsCardTable verifies the follow-up
+// breadcrumb emitted by the update command (not just the helper) pins
+// --card-table from the wormhole's parent, so command wiring can't regress
+// unnoticed. Flags.Hints keeps breadcrumbs in the envelope (app.OK strips them
+// otherwise).
+func TestCardsWormholesUpdateBreadcrumbPinsCardTable(t *testing.T) {
+	transport := &mockWormholeTransport{}
+	app, buf := newTestAppWithTransport(t, transport)
+	app.Flags.Hints = true
+
+	project := ""
+	err := executeCommand(newCardsWormholesUpdateCmd(&project), app, "111", "--to-column", "888")
+	require.NoError(t, err)
+
+	var envelope struct {
+		Breadcrumbs []output.Breadcrumb `json:"breadcrumbs"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &envelope))
+	require.Len(t, envelope.Breadcrumbs, 1)
+	assert.Contains(t, envelope.Breadcrumbs[0].Cmd, "cards wormholes list --in 123 --card-table 555")
+}

@@ -6,17 +6,19 @@ Coverage of Basecamp 3 API endpoints. Source: [bc3-api/sections](https://github.
 
 | Status | Sections | Endpoints |
 |--------|----------|-----------|
-| ✅ Implemented | 43 | 163 |
+| ✅ Implemented | 44 | 166 |
 | ⏭️ Out of scope | 4 | 12 |
-| **Total (docs)** | **47** | **175** |
+| **Total tracked** | **48** | **178** |
 
-**100% coverage of in-scope API** (163/163 endpoints)
+**100% coverage of tracked in-scope API** (166/166 endpoints). This is not a
+complete bc-api parity figure; the other five BC5 sections introduced by
+bc-api#410 remain untracked and outside this coverage matrix.
 
 Out-of-scope sections are excluded from parity totals and scripts: chatbots (different auth), legacy Clientside (deprecated)
 
-> Note: the per-row `Endpoints` column in the Coverage by Section table sums higher than the Summary totals above. The discrepancy predates the BC5 baseline; the row count (47 sections) is authoritative for the `Since` column. Reconciling endpoint counts is pre-existing maintenance, tracked separately.
+> Note: the per-row `Endpoints` column in the Coverage by Section table sums higher than the Summary totals above. The discrepancy predates the BC5 baseline; the row count (48 sections) is authoritative for the `Since` column. Reconciling endpoint counts is pre-existing maintenance, tracked separately.
 
-**SDK version:** v0.8.1-0.20260724184307-e2c1abea4aea — adds `Todolists.Reposition` (`PUT /todosets/todolists/{id}/position.json`, basecamp/basecamp-sdk#398), consumed by `todolists position`; also carries the create-time `visible_to_clients` support behind `todolists create --visible-to-clients`, `Campfires.UpdateLine` (`PUT /chats/{c}/lines/{l}`, basecamp/basecamp-sdk#295), consumed by `chat update`, and the BC5 `Tools.Create` create-by-type reshape. API date 2026-07-24.
+**SDK version:** v0.8.1-0.20260725044648-3d4ec395922c — adds the `Wormholes` service (`Create`/`Update`/`Delete`) and decodes `CardTable.Wormholes` (`card_table_wormholes`, basecamp/basecamp-sdk#397), consumed by `cards wormholes` and `cards move --to-wormhole`; also carries `Todolists.Reposition` (`PUT /todosets/todolists/{id}/position.json`, basecamp/basecamp-sdk#398) behind `todolists position`, create-time `visible_to_clients` support behind `todolists create --visible-to-clients`, `Campfires.UpdateLine` (`PUT /chats/{c}/lines/{l}`, basecamp/basecamp-sdk#295) behind `chat update`, and the BC5 `Tools.Create` create-by-type reshape. API date 2026-07-24.
 
 ## Coverage by Section
 
@@ -47,6 +49,7 @@ The **Since** column tags each row with the Basecamp version that introduced its
 | card_table_cards | 9 | `cards` | ✅ | BC4 | - | list, show, create, update, move |
 | card_table_columns | 11 | `cards columns` | ✅ | BC4 | - | list columns |
 | card_table_steps | 4 | `cards steps` | ✅ | BC4 | - | Workflow steps on cards |
+| card_table_wormholes | 3 | `cards wormholes` | ✅ | BC5 | - | list (via `wormholes[]` on card table), create, update, delete; `cards move --to-wormhole` teleports a card across projects (async, new id) |
 | **People** |
 | people | 12 | `people`, `me` | ✅ | BC4 | - | list, show, pingable, add, remove (BC5: `tagline` alias of `bio` on person output) |
 | **Search & Recordings** |
