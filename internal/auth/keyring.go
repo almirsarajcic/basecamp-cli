@@ -17,10 +17,17 @@ type Credentials struct {
 	RefreshToken  string `json:"refresh_token"`
 	ExpiresAt     int64  `json:"expires_at"`
 	Scope         string `json:"scope"`
-	OAuthType     string `json:"oauth_type"` // "bc3" or "launchpad"
+	OAuthType     string `json:"oauth_type"` // "bc5", "launchpad", or legacy "bc3"
 	TokenEndpoint string `json:"token_endpoint"`
 	UserID        string `json:"user_id,omitempty"`
 	UserEmail     string `json:"user_email,omitempty"`
+
+	// Resource is the RFC 8707 resource indicator the tokens are bound to
+	// (BC5: urn:bc:account:<id>). BC5 device logins as the trusted
+	// basecamp-cli client mint MULTI-ACCOUNT refresh tokens, and the refresh
+	// grant rejects them without this echo — refresh sends it when set and
+	// preserves it when a refresh response omits it.
+	Resource string `json:"resource,omitempty"`
 }
 
 // Store wraps credstore.Store with typed Credentials marshaling.
