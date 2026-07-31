@@ -22,7 +22,6 @@ All 17 methods, and the invocation that reaches each.
 | `comments list --all-projects` | `Comments` | `.Recordings` | yes |
 | `checkins answers --all-projects` | `Checkins` | `.Recordings` | yes |
 | `forwards list --all-projects` | `Forwards` | `.Recordings` | yes |
-| `boost list --all-projects` | `Boosts` | `.Boosts` | yes |
 | `files list --all-projects` | `Files` | `.Files` | yes |
 | `todos list --all-projects` | `OpenTodos` | `.Groups` | yes |
 | `todos list --all-projects --status completed` | `CompletedTodos` | `.Groups` | yes |
@@ -71,10 +70,10 @@ ambient config.
 
 #### Per-item dispatch
 
-The per-item groups (`comments`, `boost`, `checkins answers`) list the children
-of one recording, so a project alone cannot produce a listing — only an item ID
-can. Their dispatch is therefore its own truth table, and it overrides the
-general precedence above:
+The per-item groups (`comments`, `checkins answers`) list the children of one
+recording, so a project alone cannot produce a listing — only an item ID can.
+Their dispatch is therefore its own truth table, and it overrides the general
+precedence above:
 
 | ID/URL | Explicit project | `--all-projects` | Result |
 |---|---|---|---|
@@ -86,8 +85,13 @@ general precedence above:
 | absent | absent | present | account-wide, intent pinned |
 
 The fourth row is the deliberate exception to "a configured project selects
-project scope": for these three commands a configured project is not a scope
-that can be honored, so it is ignored rather than turned into an error.
+project scope": for these two commands a configured project is not a scope that
+can be honored, so it is ignored rather than turned into an error.
+
+`boost list` is per-item in the same way but has **no account-wide row at all**
+— the aggregate behind it is being withdrawn server-side. Every absent-ID case
+asks for an ID, and it carries no `--all-projects`. See "`boost list` —
+withdrawn" under I5.
 
 ### I3 — No flag is silently ignored
 
@@ -105,10 +109,16 @@ values) are rejected, pointing at the command that does answer the question
 (e.g. `reports assigned`).
 
 **No new flags** beyond `--all-projects`, the endpoint selectors the method
-matrix names, and one recorded exception. The account-wide path reuses the
-filter, sort, and pagination flags a command already has; it does not grow a
-parallel flag surface. The exception is `files list`, which today has no filters
-at all and gains two account-wide-only ones — see I5.
+matrix names, the `files list` filters, and the pagination flags the two
+flagless commands needed. The account-wide path reuses the filter and sort flags
+a command already has; it does not grow a parallel flag surface for its own
+sake.
+
+Pagination is the one place where "reuse only" turned out to be wrong. A command
+with no `--limit`/`--page`/`--all` has no way to recover from a server error
+mid-crawl and no way to reach past a bounded default, so bare `files list`
+gained all three — see I5. (`boost list` gained them too, then lost them along
+with the account-wide boost feed itself — see below.)
 
 #### Endpoint selectors
 
@@ -118,7 +128,7 @@ flags added by this work — anything not listed here is reuse:
 
 | Command | New flag | Selects | Scope |
 |---|---|---|---|
-| all eight | `--all-projects` | account-wide | — |
+| all seven | `--all-projects` | account-wide | — |
 | `todos list` | `--unassigned` | `UnassignedTodos` | account-wide only |
 | `todos list` | `--no-due-date` | `NoDueDateTodos` | account-wide only |
 | `cards list` | `--status` (only `completed`) | `CompletedCards` | account-wide only |
@@ -127,6 +137,7 @@ flags added by this work — anything not listed here is reuse:
 | `cards list` | `--not-now` | `NotNowCards` | account-wide only |
 | `cards list` | `--overdue` | `OverdueCards` | account-wide only |
 | `files list` | `--kind`, `--person` | filters on `Files` | account-wide only — see I5 |
+| `files list` | `--limit`/`-n`, `--page`, `--all` | pagination on `Files` | account-wide only — see I5 |
 
 **Account-wide only** means exactly what it means for the `files list` filters:
 the project-scoped path has no equivalent, so passing one with a project in
@@ -143,7 +154,7 @@ pair.
 **Sorting flags are reused where they exist and never added.** Verified current
 state: among these commands only `messages list`, `todos list`, and `cards list`
 expose `--sort`/`--reverse`. `comments list`, `checkins answers`,
-`forwards list`, `boost list`, and bare `files list` expose neither and gain
+`forwards list`, and bare `files list` expose neither and gain
 neither — an unsorted account-wide feed is the honest result, not a gap to
 paper over.
 
@@ -167,36 +178,84 @@ exactly page `N`.
 
 | Flag | Mapping |
 |---|---|
-| `--all` | page 0 |
+| `--all` | page 0 — the whole account |
 | `--page N` | page N (any positive N) |
-| `--limit N` | client-side truncation to N, with an honest truncation notice |
-| default | the command's documented default, per the table below |
+| `--limit N` | **bounds the fetch**: walks positive pages until N items are collected, then trims to exactly N |
+| default | a bounded cap, per the table below |
+
+`--limit` bounding the fetch is the point. Fetching page 0 and then truncating
+is correct and useless: it downloads the entire account to keep the first
+hundred rows, which is what made `cards list --limit 3` take 16s while
+`todos list --limit 3` took none. `accountWideCollect` is the shared walk.
+
+**Three deliberate exceptions**, each with a reason that is not "we didn't get
+to it":
+
+1. **Sorted `messages list`** fetches every page before capping. The cap applies
+   after the sort (I4), so every page has to be in hand first. Pinned by
+   `TestMessagesListAccountWideSortsBeforeTruncating`.
+2. **The overdue endpoints** (`todos list --overdue`, `cards list --overdue`)
+   are unpaginated — one request returns everything — so `--limit` trims
+   locally. There is no walk to bound.
+3. ~~**`boost list`** keeps a first-page default.~~ Withdrawn — there is no
+   account-wide boost listing at all now. See below.
 
 #### Per-command defaults
 
-"The command's documented default" is not left to interpretation. Each
-command's account-wide default matches what it already does project-scoped:
+Pinning each account-wide default to its project-scoped default was a mistake,
+and it is the mistake this section exists to correct. Project-scoped "all" is
+one project's items; account-wide "all" is the whole account. The same word
+describes two very different amounts of work, and on a ~80-project account the
+account-wide reading of it timed out.
 
-| Command | Existing default | Account-wide contract |
+**The default is a uniform cap of 100** (`accountWideDefaultLimit`), with two
+rows that differ for stated reasons. `--all` is how you ask for the account.
+
+| Command | Account-wide default | Notes |
 |---|---|---|
-| `messages list` | 100 | cap 100 |
-| `comments list` | 100 | cap 100 |
-| `checkins answers` | all | all |
-| `forwards list` | all | all |
-| `boost list` | no paging flags | first page only |
-| `files list` | no paging flags | all pages |
-| `todos list` | 100 | cap 100 |
-| `cards list` | all | all |
+| `messages list` | cap 100 | unchanged |
+| `comments list` | cap 100 | unchanged |
+| `todos list` | cap 100 | unchanged |
+| `cards list` | cap 100 | **changed** from "all pages" |
+| `checkins answers` | cap 100 | **changed** from "all pages" |
+| `forwards list` | cap 100 | **changed** from "all pages" |
+| `files list` | cap 100 | **changed** from "all pages" |
+| `todos list --overdue` | cap 100 | unpaginated endpoint; accepts `--all`, rejects `--page` |
+| `cards list --overdue` | cap 100 | **changed** from uncapped; same rules as above |
 
-The default must remain the documented default. Degrading a documented cap to
-"one raw SDK page" is a silent contract change; so is promoting an unpaged
-command to a capped one.
+Project-scoped defaults are untouched throughout.
+
+**The two overdue rows.** Both endpoints are unpaginated, so `--page` has
+nothing to address and stays an error. `--all` is a different question: it means
+"skip the cap", and since the complete array is already in hand it costs no
+extra request. Previously `todos --overdue` capped at 100 *and* rejected `--all`,
+which left item 101 unreachable by any flag combination — capped with no escape
+hatch. `cards --overdue` was uncapped and also rejected `--all`.
+
+**Changing a default is allowed when the old one was wrong.** The earlier
+version of this section forbade moving a default in either direction. That rule
+protected a contract that could not be honored at scale. What must not happen is
+a default changing *silently*: each row marked **changed** above is a documented
+behavior change and belongs in the release notes.
 
 #### Rules
 
-- **No new pagination flags where none exist.** `boost list` and bare
-  `files list` have no `--limit`/`--page`/`--all` today and gain none. Their
-  account-wide behavior is fixed by the table above.
+- **Every account-wide listing needs a bounded default and a way to ask for
+  more.** A listing with no escape hatch cannot recover from a server error
+  mid-crawl: when `files list --all-projects` returned a 500 partway through the
+  full-account crawl, there was no flag that could step around the failing page,
+  because the command had none. A bounded default without a way past it is the
+  same defect from the other side.
+- **A registered flag must work on every path that accepts it.** Where a path
+  genuinely has no pagination, it rejects all three by name rather than
+  accepting and ignoring them (`rejectScopedPaginationFlags`):
+  - **Project-scoped `files list`** rejects `--limit`/`--page`/`--all`. That
+    path passes `nil` to `Vaults().List`, `Uploads().List`, and
+    `Documents().List` — three unpaginated calls with nowhere to put a page.
+  - **`boost list`** carries none of the three at all. The SDK documents
+    `BoostListOptions.Page` as not honoring the page number — setting `Page=2`
+    does not fetch page 2 — and the account-wide feed they were added for is
+    gone.
 - **`--limit N` on grouped todo/card responses counts inner todos/cards, not
   outer project groups.** Truncating groups would silently drop whole projects.
 - **`Meta.TotalCount` counts groups, not items,** for the grouped responses.
@@ -208,6 +267,48 @@ command to a capped one.
   crawl they did not ask for, and that is the same no-silent-flags defect I3
   names. `--all` is the spelling for every page.
 
+#### `boost list` — withdrawn
+
+There is **no account-wide boost listing.** `boost list` requires an item ID.
+
+The `/boosts.json` aggregate this section used to document was an easter egg —
+unlinked from the Basecamp web UI, ~2,250 requests per 30 days globally, and
+this CLI its only known consumer. BC5 has **withdrawn it** (bc3#12464); the
+path 404s on both the web and API hosts once that deploys, so the CLI stops
+calling it.
+
+The cause, from BC3's own diagnosis rather than inference: the query's cost is
+proportional to the account's **accessible recordings, not its boosts**. That
+is why it measured ~44s on the largest account and why page 40 cost the same as
+page 1 (bc3#12458 has the timings).
+
+**The withdrawal is temporary.** The feed is expected back on a
+boost-proportional query, via a `boosts.bucket_id` denormalization, with the
+design record in bc3#12463. Public notice: basecamp/bc-api#427. So this section
+describes a listing that is gone for now, not one that was judged a bad idea.
+
+What that means here:
+
+- `boost list` takes an item ID, and rejecting a bare invocation is the honest
+  answer rather than a fallback to an endpoint that will 404.
+- It carries no `--all-projects`, `--limit`, `--page`, or `--all`. An item's
+  boosts arrive in one unpaginated response, and the SDK documents
+  `BoostListOptions.Page` as not honoring a page number, so there would be
+  nothing for those flags to address even if the aggregate had survived.
+- **`Everything().Boosts()` is being removed from the SDK too.** The initial
+  brief asked that it stay — churning every generated client twice for a
+  temporary withdrawal seemed worse than letting it 404 — but the endpoint is
+  going away for real on the server, so the SDK drops it rather than ship an
+  operation that cannot work. That is the SDK's call; this repo only has to not
+  call it, which it already does. The CLI carries **zero** references to the
+  aggregate, so the SDK bump that removes it needs no CLI change.
+
+Everything else is untouched: the other Everything feeds, the bucket-scoped
+boosts endpoints, and the `boosts_count`/`boosts_url` recording attributes.
+
+Seven commands list account-wide, not eight — until the feed returns, at which
+point this is the section to revisit.
+
 #### The `files list` filter exception
 
 `EverythingFilesOptions` carries filters the project-scoped path has no
@@ -218,15 +319,15 @@ kind nor a creator. Rather than leave adopted SDK surface unreachable, bare
 | Flag | Value | Maps to |
 |---|---|---|
 | `--kind` | `all`, `images`, `pdfs`, `documents`, `videos` | `EverythingFilesOptions.Kind` |
-| `--person` | repeatable; name, email, ID, or `me`, resolved via `resolveAssigneeID` | `EverythingFilesOptions.PeopleIDs` |
+| `--person` | repeatable; name, email, ID, or `me`, resolved via `resolvePersonRoleID(ctx, app, person, "Person")` | `EverythingFilesOptions.PeopleIDs` |
 
 Both are **account-wide-only**. Passing either with a project in scope —
 explicit, configured, or via `--vault`/`--folder` — is `ErrUsage`, because the
 project-scoped path would have to ignore them, and I3 forbids that. An
 unrecognized `--kind` value is `ErrUsage` listing the accepted set.
 
-This is the one deliberate exception to I3's "no new flags"; it is recorded here
-so it stays an exception rather than a precedent.
+These filters are account-wide-only by nature rather than by policy: the
+project-scoped path has nothing to map them onto.
 
 #### The `files` group's alias spellings
 
@@ -241,17 +342,11 @@ therefore gets its own account-wide meaning:
 
 | Spelling | Account-wide behavior |
 |---|---|
-| `files list` | the whole feed, `--kind` free |
+| `files list` | the feed, `--kind` free, bounded by the cap and its pagination flags |
 | `vaults` / `folders list` | **ErrUsage** — folders have no account-wide listing; points at the project-scoped form and at `files list --all-projects` |
 | `docs` / `documents list` | the feed pinned to `--kind documents`; an explicit `--kind` is ErrUsage, since the command name already chose |
 
 The project-scoped behavior of all three is unchanged.
-
-**Accepted tradeoff.** Honoring a 100-item cap by fetching page 0 downloads
-every page before truncating, which is correct but potentially expensive on
-large accounts. Where sorting is not in play, a bounded loop over positive pages
-that stops once the limit is collected is the cheaper equivalent and is
-preferred. Recorded here so the cost is a decision rather than an accident.
 
 ### I6 — Output contract
 
@@ -267,14 +362,13 @@ precedent in `internal/commands/search.go`:
 - **styled**: flattened rows carrying at least project name, id, and
   title/subject, plus status and due date where applicable.
 
-Which payloads actually need flattening, so the eight commands do not each
+Which payloads actually need flattening, so the seven commands do not each
 answer this differently:
 
 | Payload | Commands | Styled treatment |
 |---|---|---|
 | `[]Recording` | messages, comments, checkins answers, forwards | flatten — the generic renderer drops the nested `bucket`, and a project column is exactly what an account-wide row needs |
 | `[]Todo`, `[]Card` (flat overdue) | todos, cards `--overdue` | flatten — same reason as `[]Recording`; the items come from every project and `bucket` is skipped by name |
-| `[]EverythingBoost` | boost | flatten — the boosted `*Recording` is nested |
 | `[]EverythingFile` | files | flatten — all-pointer superset, too wide to render raw |
 | `[]BucketTodosGroup`, `[]BucketCardsGroup` | todos, cards | flatten — nested groups render as unreadable cells |
 
@@ -298,7 +392,6 @@ groups and `--ids` finds no ids at all, both silently.
 
 `EverythingFile` is an all-pointer superset over the Upload, Document, and
 Attachment variants — every field read during flattening must be nil-checked.
-`EverythingBoost.Booster` and `.Recording` are pointers too.
 
 ### I7 — No interactive prompt
 

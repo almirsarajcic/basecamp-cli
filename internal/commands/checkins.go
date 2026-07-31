@@ -603,7 +603,7 @@ on its own cannot name a question; --all-projects states that intent outright:
 		},
 	}
 
-	cmd.Flags().IntVarP(&limit, "limit", "n", 0, "Maximum number of answers to fetch (0 = all)")
+	cmd.Flags().IntVarP(&limit, "limit", "n", 0, "Maximum number of answers to fetch (0 = all for one question, 100 account-wide; use --all for every page)")
 	cmd.Flags().BoolVar(&all, "all", false, "Fetch all answers (no limit)")
 	cmd.Flags().IntVar(&page, "page", 0, "Fetch a single page (use --all for everything)")
 	cmd.Flags().BoolVar(&allProjects, "all-projects", false, "List check-in answers across every project (no question ID)")
@@ -748,29 +748,49 @@ func runCheckinsAnswersAccountWide(cmd *cobra.Command, app *appctx.App, question
 		return output.ErrUsage("--page cannot be combined with --all or --limit")
 	}
 
-	// The project-scoped default is "0 = all", so the account-wide default
-	// follows every page too. Only an explicit --page narrows it to one.
-	sdkPage, err := accountWidePage(page, all || page == 0)
-	if err != nil {
-		return err
-	}
-	answersPage, err := app.Account().Everything().Checkins(cmd.Context(), sdkPage)
-	if err != nil {
-		return convertSDKError(err)
+	fetch := func(p int32) ([]basecamp.Recording, basecamp.ListMeta, error) {
+		answersPage, err := app.Account().Everything().Checkins(cmd.Context(), p)
+		if err != nil {
+			return nil, basecamp.ListMeta{}, convertSDKError(err)
+		}
+		return answersPage.Recordings, answersPage.Meta, nil
 	}
 
-	answers := answersPage.Recordings
-	fetched := len(answers)
-	if limit > 0 && fetched > limit {
-		answers = answers[:limit]
+	// Account-wide "all" is every answer in the account, which on a large one
+	// is a crawl nobody asked for. Bound the default and let --all say it.
+	var (
+		answers []basecamp.Recording
+		meta    basecamp.ListMeta
+		capped  bool
+	)
+	if all || page > 0 {
+		sdkPage, err := accountWidePage(page, all)
+		if err != nil {
+			return err
+		}
+		if answers, meta, err = fetch(sdkPage); err != nil {
+			return err
+		}
+	} else {
+		effectiveLimit := limit
+		if effectiveLimit == 0 {
+			effectiveLimit = accountWideDefaultLimit
+		}
+		var err error
+		if answers, capped, meta, err = accountWideCollect(fetch, accountWideFlatCount[basecamp.Recording], effectiveLimit); err != nil {
+			return err
+		}
+		// The walk stops at a page boundary, so trim to the exact cap.
+		if len(answers) > effectiveLimit {
+			answers = answers[:effectiveLimit]
+		}
 	}
 
-	respOpts := accountWideRespOpts(len(answers), "check-in answer", "check-in answers", answersPage.Meta, "--all", limit > 0)
+	respOpts := accountWideRespOpts(len(answers), "check-in answer", "check-in answers", meta, limit > 0)
+	if notice := accountWideCapNotice(capped, meta, len(answers), "check-in answers"); notice != "" {
+		respOpts = append(respOpts, output.WithNotice(notice))
+	}
 	respOpts = append(respOpts, output.WithDisplayData(flattenAccountWideRecordings(answers)))
-	if len(answers) < fetched {
-		respOpts = append(respOpts, output.WithNotice(fmt.Sprintf(
-			"Showing %d of %d fetched check-in answers (--limit); drop --limit for all of them", len(answers), fetched)))
-	}
 	respOpts = append(respOpts, output.WithBreadcrumbs(
 		output.Breadcrumb{
 			Action:      "answer",

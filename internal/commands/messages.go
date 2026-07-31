@@ -197,11 +197,6 @@ func messagesListBreadcrumbs(resolvedProjectID string) []output.Breadcrumb {
 	}
 }
 
-// messagesAccountWideLimit is the account-wide default cap. It matches what the
-// project-scoped list already returns by default, so dropping the project does
-// not quietly change how much a caller gets back.
-const messagesAccountWideLimit = 100
-
 // runMessagesListAccountWide lists every message across all accessible
 // projects. The feed is flat []Recording, and each item carries its own
 // bucket — which the generic renderers skip by name, so human-facing output
@@ -229,13 +224,17 @@ func runMessagesListAccountWide(cmd *cobra.Command, app *appctx.App, messageBoar
 			"use --all to follow every page")
 	}
 
-	capped := !all && page == 0
+	// bounded reports that this invocation applies a cap at all; capped
+	// reports that the walk actually stopped short of the listing. They are
+	// different questions — --all is unbounded, and a bounded walk that
+	// reaches the end of a short listing is not truncated.
+	bounded := !all && page == 0
 	wanted := limit
 	if wanted == 0 {
-		wanted = messagesAccountWideLimit
+		wanted = accountWideDefaultLimit
 	}
 
-	recordings, meta, err := messagesAccountWideFetch(cmd.Context(), app, wanted, page, all, sortField != "")
+	recordings, capped, meta, err := messagesAccountWideFetch(cmd.Context(), app, wanted, page, all, sortField != "")
 	if err != nil {
 		return err
 	}
@@ -245,11 +244,17 @@ func runMessagesListAccountWide(cmd *cobra.Command, app *appctx.App, messageBoar
 	if sortField != "" {
 		sortMessagesAccountWide(recordings, sortField, reverse)
 	}
-	if capped && len(recordings) > wanted {
+	if bounded && len(recordings) > wanted {
+		// A sorted listing arrives whole and is capped here, so the trim is
+		// itself the truncation the notice has to report.
+		capped = true
 		recordings = recordings[:wanted]
 	}
 
-	respOpts := accountWideRespOpts(len(recordings), "message", "messages", meta, "--all", limit > 0)
+	respOpts := accountWideRespOpts(len(recordings), "message", "messages", meta, limit > 0)
+	if notice := accountWideCapNotice(capped, meta, len(recordings), "messages"); notice != "" {
+		respOpts = append(respOpts, output.WithNotice(notice))
+	}
 	respOpts = append(respOpts, output.WithDisplayData(flattenAccountWideRecordings(recordings)))
 	respOpts = append(respOpts, output.WithBreadcrumbs(messagesAccountWideBreadcrumbs()...))
 
@@ -264,7 +269,7 @@ func runMessagesListAccountWide(cmd *cobra.Command, app *appctx.App, messageBoar
 // rather than crawling the whole account and discarding most of it. A sorted
 // listing cannot do that — the cap applies after the sort, so every page has to
 // be in hand first.
-func messagesAccountWideFetch(ctx context.Context, app *appctx.App, wanted, page int, all, sorted bool) ([]basecamp.Recording, basecamp.ListMeta, error) {
+func messagesAccountWideFetch(ctx context.Context, app *appctx.App, wanted, page int, all, sorted bool) ([]basecamp.Recording, bool, basecamp.ListMeta, error) {
 	everything := app.Account().Everything()
 
 	fetch := func(p int32) ([]basecamp.Recording, basecamp.ListMeta, error) {
@@ -275,33 +280,27 @@ func messagesAccountWideFetch(ctx context.Context, app *appctx.App, wanted, page
 		return result.Recordings, result.Meta, nil
 	}
 
+	// An explicit page or --all is exactly what was asked for, and a sorted
+	// listing needs every page before the cap can apply (I4). Neither is a
+	// bounded walk, so neither can report one stopping short.
 	if page > 0 || all {
 		sdkPage, err := accountWidePage(page, all)
 		if err != nil {
-			return nil, basecamp.ListMeta{}, err
+			return nil, false, basecamp.ListMeta{}, err
 		}
-		return fetch(sdkPage)
+		recordings, meta, err := fetch(sdkPage)
+		return recordings, false, meta, err
 	}
 	if sorted {
-		return fetch(0)
+		recordings, meta, err := fetch(0)
+		return recordings, false, meta, err
 	}
 
-	var recordings []basecamp.Recording
-	var meta basecamp.ListMeta
-	for p := int32(1); len(recordings) < wanted; p++ {
-		pageRecordings, pageMeta, err := fetch(p)
-		if err != nil {
-			return nil, basecamp.ListMeta{}, err
-		}
-		if p == 1 {
-			meta = pageMeta
-		}
-		if len(pageRecordings) == 0 {
-			break
-		}
-		recordings = append(recordings, pageRecordings...)
+	recordings, capped, meta, err := accountWideCollect(fetch, accountWideFlatCount[basecamp.Recording], wanted)
+	if err != nil {
+		return nil, false, basecamp.ListMeta{}, err
 	}
-	return recordings, meta, nil
+	return recordings, capped, meta, nil
 }
 
 func messagesAccountWideBreadcrumbs() []output.Breadcrumb {

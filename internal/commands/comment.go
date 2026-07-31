@@ -192,11 +192,6 @@ func runCommentsListForItem(cmd *cobra.Command, app *appctx.App, recordingArg st
 	return app.OK(comments, respOpts...)
 }
 
-// defaultAccountWideCommentLimit caps the account-wide feed at the same 100
-// comments `comments list <id>` defaults to. Dropping the item must not
-// silently promote a bounded command into a full-account crawl.
-const defaultAccountWideCommentLimit = 100
-
 // runCommentsListAccountWide lists every comment in the account, newest first.
 // The payload is []Recording, which machine formats get raw. Human-facing
 // output gets flattened rows instead: the generic renderers skip the nested
@@ -229,6 +224,7 @@ func runCommentsListAccountWide(cmd *cobra.Command, app *appctx.App, limit, page
 	var (
 		comments []basecamp.Recording
 		meta     basecamp.ListMeta
+		capped   bool
 	)
 	switch {
 	case all || page > 0:
@@ -245,18 +241,22 @@ func runCommentsListAccountWide(cmd *cobra.Command, app *appctx.App, limit, page
 		}
 		comments, meta = result.Recordings, result.Meta
 	default:
-		effectiveLimit := defaultAccountWideCommentLimit
+		effectiveLimit := accountWideDefaultLimit
 		if limit > 0 {
 			effectiveLimit = limit
 		}
 		var err error
-		comments, meta, err = fetchAccountWideComments(cmd, app, effectiveLimit)
+		comments, capped, meta, err = fetchAccountWideComments(cmd, app, effectiveLimit)
 		if err != nil {
 			return err
 		}
 	}
 
-	respOpts := append(accountWideRespOpts(len(comments), "comment", "comments", meta, "--all", limit > 0),
+	respOpts := accountWideRespOpts(len(comments), "comment", "comments", meta, limit > 0)
+	if notice := accountWideCapNotice(capped, meta, len(comments), "comments"); notice != "" {
+		respOpts = append(respOpts, output.WithNotice(notice))
+	}
+	respOpts = append(respOpts,
 		output.WithDisplayData(flattenAccountWideRecordings(comments)),
 		output.WithBreadcrumbs(
 			output.Breadcrumb{
@@ -279,31 +279,26 @@ func runCommentsListAccountWide(cmd *cobra.Command, app *appctx.App, limit, page
 // Asking for page 0 would follow the Link header to the end of the account
 // before truncating — correct, but it downloads every comment to keep 100.
 // Each iteration adds at least one comment, so the walk always terminates.
-func fetchAccountWideComments(cmd *cobra.Command, app *appctx.App, limit int) ([]basecamp.Recording, basecamp.ListMeta, error) {
-	var (
-		comments []basecamp.Recording
-		meta     basecamp.ListMeta
+func fetchAccountWideComments(cmd *cobra.Command, app *appctx.App, limit int) ([]basecamp.Recording, bool, basecamp.ListMeta, error) {
+	comments, capped, meta, err := accountWideCollect(
+		func(page int32) ([]basecamp.Recording, basecamp.ListMeta, error) {
+			result, err := app.Account().Everything().Comments(cmd.Context(), page)
+			if err != nil {
+				return nil, basecamp.ListMeta{}, convertSDKError(err)
+			}
+			return result.Recordings, result.Meta, nil
+		},
+		accountWideFlatCount[basecamp.Recording],
+		limit,
 	)
-	for page := int32(1); len(comments) < limit; page++ {
-		result, err := app.Account().Everything().Comments(cmd.Context(), page)
-		if err != nil {
-			return nil, meta, convertSDKError(err)
-		}
-		if page == 1 {
-			// X-Total-Count is the account-wide total on every page; take it
-			// from the first so the truncation notice is honest about how much
-			// this walk left behind.
-			meta = result.Meta
-		}
-		if len(result.Recordings) == 0 {
-			break
-		}
-		comments = append(comments, result.Recordings...)
+	if err != nil {
+		return nil, false, basecamp.ListMeta{}, err
 	}
+	// The walk stops at a page boundary, so trim to the exact cap.
 	if len(comments) > limit {
 		comments = comments[:limit]
 	}
-	return comments, meta, nil
+	return comments, capped, meta, nil
 }
 
 func newCommentsShowCmd() *cobra.Command {

@@ -7,8 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/basecamp/basecamp-sdk/go/pkg/basecamp"
-
 	"github.com/basecamp/basecamp-cli/internal/appctx"
 	"github.com/basecamp/basecamp-cli/internal/output"
 )
@@ -50,11 +48,10 @@ Tip: In the TUI, press 'b' on any item to boost interactively.`,
 
 func newBoostListCmd(project *string) *cobra.Command {
 	var eventID string
-	var allProjects bool
 
 	cmd := &cobra.Command{
-		Use:   "list [id|url]",
-		Short: "List boosts on an item, or across every project",
+		Use:   "list <id|url>",
+		Short: "List boosts on an item",
 		Long: `List boosts on an item.
 
 You can pass either an ID or a Basecamp URL:
@@ -63,57 +60,39 @@ You can pass either an ID or a Basecamp URL:
 
 Use --event to list boosts on a specific event within the item.
 
-Without an ID, boosts from every accessible project are listed, newest
-first — the first page of the feed:
-  basecamp boost list
-  basecamp boost list --all-projects`,
-		Args: cobra.MaximumNArgs(1),
+Boosts hang off a single item, so an item ID is required: there is no
+account-wide boost listing. An item's boosts arrive in one unpaginated
+response, so there is nothing to page through either.`,
+		Example: `  basecamp boost list 789 --project my-project`,
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app := appctx.FromContext(cmd.Context())
+			if len(args) == 0 {
+				return missingArg(cmd, "<id|url>")
+			}
 			if err := ensureAccount(cmd, app); err != nil {
 				return err
 			}
-			recording := ""
-			if len(args) > 0 {
-				recording = args[0]
-			}
-			return runBoostList(cmd, app, recording, *project, eventID, allProjects)
+			return runBoostList(cmd, app, args[0], *project, eventID)
 		},
 	}
 
 	cmd.Flags().StringVar(&eventID, "event", "", "Event ID (for event-specific boosts)")
-	cmd.Flags().BoolVar(&allProjects, "all-projects", false, "List boosts across every project")
 
 	return cmd
 }
 
-func runBoostList(cmd *cobra.Command, app *appctx.App, recording, project, eventID string, allProjects bool) error {
-	// Boosts hang off a single recording, so a project cannot scope this
-	// listing on its own — only an item ID can. Without one, the account-wide
-	// feed answers instead, and a configured project is ignored rather than
-	// turned into an error, since it could never have produced a listing here.
-	explicitProject := project
-	if explicitProject == "" {
-		explicitProject = app.Flags.Project
-	}
-
-	if recording == "" {
-		switch {
-		case explicitProject != "" && allProjects:
-			return output.ErrUsageHint("Cannot combine --all-projects with --project",
-				"--all-projects lists boosts from every project; drop --project, or pass an item ID to list one item's boosts")
-		case explicitProject != "":
-			return output.ErrUsageHint("Boosts belong to an item, so --project alone cannot list them",
-				fmt.Sprintf("Pass the item's ID or URL: basecamp boost list <id> --project %s", explicitProject))
-		}
-		return runBoostListAccountWide(cmd, app, eventID)
-	}
-
-	if allProjects {
-		return output.ErrUsageHint("Cannot combine --all-projects with an item ID",
-			"Drop the ID to list boosts across every project, or drop --all-projects to list that item's boosts")
-	}
-
+func runBoostList(cmd *cobra.Command, app *appctx.App, recording, project, eventID string) error {
+	// Boosts hang off a single recording, so only an item ID can scope this
+	// listing — a project cannot, and there is no account-wide equivalent to
+	// fall back to: BC5 withdrew /boosts.json (basecamp/bc3#12464) because its
+	// cost scaled with accessible recordings rather than with boosts.
+	//
+	// The feed is expected back later on a boost-proportional query
+	// (basecamp/bc3#12463), but the endpoint is genuinely gone in the meantime
+	// and the SDK is dropping Everything().Boosts() with it. When it returns,
+	// this is where the account-wide branch goes back, along with
+	// --all-projects.
 	recordingID, urlProjectID := extractWithProject(recording)
 
 	projectID := project
@@ -185,72 +164,6 @@ func runBoostList(cmd *cobra.Command, app *appctx.App, recording, project, event
 			},
 		),
 	)
-}
-
-// runBoostListAccountWide lists boosts across every accessible project. The
-// feed takes a page number and boost list has no paging flags to map onto it,
-// so it stays on the first page rather than growing a parallel flag surface.
-func runBoostListAccountWide(cmd *cobra.Command, app *appctx.App, eventID string) error {
-	if err := rejectAccountWideTodolist(app, "boost"); err != nil {
-		return err
-	}
-	if eventID != "" {
-		return output.ErrUsageHint("--event names an event inside one item, which the account-wide feed has no equivalent for",
-			"Pass the item's ID alongside --event, or drop --event to list boosts across every project")
-	}
-
-	result, err := app.Account().Everything().Boosts(cmd.Context(), 1)
-	if err != nil {
-		return convertSDKError(err)
-	}
-
-	// The boosted recording is nested, so every consumer but --json and
-	// --agent reads the flat rows: the generic renderer skips nested maps,
-	// which would drop the project and the item title that make a boost row
-	// mean anything.
-	respOpts := accountWideRespOpts(len(result.Boosts), "boost", "boosts", result.Meta, "", false)
-	respOpts = append(respOpts, output.WithDisplayData(flattenAccountWideBoosts(result.Boosts)))
-	respOpts = append(respOpts, output.WithBreadcrumbs(
-		output.Breadcrumb{
-			Action:      "show",
-			Cmd:         "basecamp boost show <boost-id>",
-			Description: "Show a boost",
-		},
-	))
-
-	return app.OK(result.Boosts, respOpts...)
-}
-
-// flattenAccountWideBoosts turns the account-wide feed into flat rows for the
-// styled renderer: each boost nests the recording it sits on, which renders as
-// an unreadable cell. Machine formats keep the nested payload. Booster and
-// Recording are both optional, so every row carries the same keys whether or
-// not the feed populated them.
-func flattenAccountWideBoosts(boosts []basecamp.EverythingBoost) []map[string]any {
-	rows := make([]map[string]any, 0, len(boosts))
-	for _, boost := range boosts {
-		booster := ""
-		if boost.Booster != nil {
-			booster = boost.Booster.Name
-		}
-		project, title, recordingType := "", "", ""
-		if boost.Recording != nil {
-			title = boost.Recording.Title
-			recordingType = simplifyType(boost.Recording.Type)
-			if boost.Recording.Bucket != nil {
-				project = boost.Recording.Bucket.Name
-			}
-		}
-		rows = append(rows, map[string]any{
-			"id":      boost.ID,
-			"project": project,
-			"booster": booster,
-			"content": boost.Content,
-			"title":   title,
-			"type":    recordingType,
-		})
-	}
-	return rows
 }
 
 func newBoostShowCmd(project *string) *cobra.Command {
