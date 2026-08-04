@@ -404,7 +404,7 @@ func TestLoginDevice_ScopeWiring(t *testing.T) {
 		assert.Equal(t, "full", result.Scope)
 	})
 
-	t.Run("unset scope omitted and defaults to read", func(t *testing.T) {
+	t.Run("unset scope requests full explicitly", func(t *testing.T) {
 		as := startDeviceAS(t)
 		as.token = func(int) (int, string) {
 			return http.StatusOK, `{"access_token":"tok","refresh_token":"ref","token_type":"bearer"}`
@@ -419,10 +419,34 @@ func TestLoginDevice_ScopeWiring(t *testing.T) {
 		})
 		require.NoError(t, err)
 
+		// Omitting scope would let the server pick its least-privilege
+		// default (read), silently making every write fail — Launchpad
+		// logins have always been read-write.
 		calls := as.deviceCalls()
 		require.Len(t, calls, 1)
-		_, hasScope := calls[0]["scope"]
-		assert.False(t, hasScope, "no scope requested means no scope parameter")
+		assert.Equal(t, "full", calls[0].Get("scope"), "an unqualified login asks for full access")
+		assert.Equal(t, "full", result.Scope)
+	})
+
+	t.Run("explicit read is honored", func(t *testing.T) {
+		as := startDeviceAS(t)
+		as.token = func(int) (int, string) {
+			return http.StatusOK, `{"access_token":"tok","refresh_token":"ref","token_type":"bearer"}`
+		}
+		resource := startResourceServer(t, as.srv.URL)
+		m := newDeviceTestManager(t, resource.URL)
+
+		result, err := m.Login(context.Background(), LoginOptions{
+			Scope:         "read",
+			Remote:        true,
+			Logger:        func(string) {},
+			deviceOptions: []oauth.DeviceOption{instantSleep()},
+		})
+		require.NoError(t, err)
+
+		calls := as.deviceCalls()
+		require.Len(t, calls, 1)
+		assert.Equal(t, "read", calls[0].Get("scope"), "--scope read is how a caller asks for less")
 		assert.Equal(t, "read", result.Scope)
 	})
 
@@ -880,4 +904,86 @@ func TestLoginDevice_ResourceEchoEndToEnd(t *testing.T) {
 	assert.Equal(t, "dev-tok-2", rotated.AccessToken)
 	assert.Equal(t, "dev-ref-2", rotated.RefreshToken)
 	assert.Equal(t, "urn:bc:account:42", rotated.Resource, "an omitted resource must preserve the stored binding")
+}
+
+// TestAccountID covers the account a BC5 token is bound to, read back from its
+// RFC 8707 resource indicator. This is what lets a device login address its
+// account without /authorization.json, which BC3 serves only on the API host.
+func TestAccountID(t *testing.T) {
+	tests := []struct {
+		name     string
+		creds    Credentials
+		expected string
+	}{
+		{
+			name:     "account URN yields the account ID",
+			creds:    Credentials{OAuthType: oauthTypeBC5, Resource: "urn:bc:account:2914079"},
+			expected: "2914079",
+		},
+		{
+			name:     "no resource indicator",
+			creds:    Credentials{OAuthType: oauthTypeBC5},
+			expected: "",
+		},
+		{
+			name: "a service origin names no account",
+			// RFC 9728 metadata publishes the serving origin; BC3 treats that
+			// form as "no account restriction", not as an account.
+			creds:    Credentials{OAuthType: oauthTypeBC5, Resource: "https://3.basecampapi.com"},
+			expected: "",
+		},
+		{
+			name:     "empty account segment",
+			creds:    Credentials{OAuthType: oauthTypeBC5, Resource: "urn:bc:account:"},
+			expected: "",
+		},
+		{
+			name: "non-numeric segment is refused",
+			// The indicator is server-controlled and feeds URL construction.
+			creds:    Credentials{OAuthType: oauthTypeBC5, Resource: "urn:bc:account:../../evil"},
+			expected: "",
+		},
+		{
+			name:     "launchpad credentials carry no binding",
+			creds:    Credentials{OAuthType: oauthTypeLaunchpad},
+			expected: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newDeviceTestManager(t, "https://example.com")
+			require.NoError(t, m.store.Save(m.credentialKey(), &tc.creds))
+			assert.Equal(t, tc.expected, m.AccountID())
+		})
+	}
+}
+
+// TestEnvTokenOverridesStoredAccountBinding pins BASECAMP_TOKEN precedence for
+// AccountID. Requests carry the environment token (AccessToken short-circuits
+// on it), so answering from a stored BC5 binding would silently address an
+// account that token may have nothing to do with.
+func TestEnvTokenOverridesStoredAccountBinding(t *testing.T) {
+	stale := &Credentials{
+		AccessToken: "stored-tok",
+		OAuthType:   oauthTypeBC5,
+		Scope:       scopeRead,
+		Resource:    "urn:bc:account:2914079",
+	}
+
+	t.Run("stored binding stands without an env token", func(t *testing.T) {
+		m := newDeviceTestManager(t, "https://example.com")
+		require.NoError(t, m.store.Save(m.credentialKey(), stale))
+		t.Setenv("BASECAMP_TOKEN", "") // don't inherit an ambient token
+
+		assert.Equal(t, "2914079", m.AccountID())
+	})
+
+	t.Run("env token suppresses the stored binding", func(t *testing.T) {
+		m := newDeviceTestManager(t, "https://example.com")
+		require.NoError(t, m.store.Save(m.credentialKey(), stale))
+		t.Setenv("BASECAMP_TOKEN", "bc_at_from_environment")
+
+		assert.Empty(t, m.AccountID(), "the env token's account is not the stored one")
+	})
 }
