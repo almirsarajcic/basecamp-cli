@@ -726,7 +726,7 @@ func (m *mockStepAssignTransport) RoundTrip(req *http.Request) (*http.Response, 
 	header := make(http.Header)
 	header.Set("Content-Type", "application/json")
 
-	stepJSON := `{"id": 456, "title": "Existing step", "completed": false, "assignees": [{"id": 11, "name": "Existing Person"}]}`
+	stepJSON := `{"id": 456, "title": "Existing step", "due_on": "2026-09-01", "completed": false, "assignees": [{"id": 11, "name": "Existing Person"}]}`
 
 	switch req.Method {
 	case "GET":
@@ -762,9 +762,12 @@ func (m *mockStepAssignTransport) RoundTrip(req *http.Request) (*http.Response, 
 	}
 }
 
-// TestAssignStepCarriesTitle verifies that assigning a person to a step sends
-// the current title in the update, which the API requires.
-func TestAssignStepCarriesTitle(t *testing.T) {
+// TestAssignStepSendsOnlyAssignees verifies that assigning a person to a step
+// sends assignee_ids and nothing else. The server preserves attributes the
+// request omits, so echoing back the title or due date would be the CLI
+// re-asserting values the caller never changed — and reverting a concurrent
+// edit to them.
+func TestAssignStepSendsOnlyAssignees(t *testing.T) {
 	transport := &mockStepAssignTransport{}
 	app := setupCardsMockApp(t, transport)
 
@@ -774,13 +777,16 @@ func TestAssignStepCarriesTitle(t *testing.T) {
 
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(transport.capturedPut, &body))
-	assert.Equal(t, "Existing step", body["title"])
+	assert.NotContains(t, body, "title")
+	assert.NotContains(t, body, "due_on")
 	assert.Equal(t, []any{float64(11), float64(99)}, body["assignee_ids"])
 }
 
-// TestUnassignStepCarriesTitle verifies that removing a person from a step
-// also sends the current title in the update.
-func TestUnassignStepCarriesTitle(t *testing.T) {
+// TestUnassignStepSendsEmptyAssigneeList verifies the same for removal, and
+// that taking off the last assignee sends an explicit empty list — omitting
+// the key would now mean "leave assignees alone", so the clear must be said
+// out loud.
+func TestUnassignStepSendsEmptyAssigneeList(t *testing.T) {
 	transport := &mockStepAssignTransport{}
 	app := setupCardsMockApp(t, transport)
 
@@ -790,6 +796,7 @@ func TestUnassignStepCarriesTitle(t *testing.T) {
 
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(transport.capturedPut, &body))
-	assert.Equal(t, "Existing step", body["title"])
+	assert.NotContains(t, body, "title")
+	assert.NotContains(t, body, "due_on")
 	assert.Equal(t, []any{}, body["assignee_ids"])
 }
