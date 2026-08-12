@@ -1353,6 +1353,218 @@ func TestFlattenUploadVersionsCarriesTheRecordedFile(t *testing.T) {
 	assert.NotContains(t, rows[2], "current", "an upload-less event gets no file columns")
 }
 
+// mockFilesReplaceTransport serves the two-step replace flow: staging the
+// attachment, then POSTing the new version to upload 789. Any other request
+// fails the test.
+type mockFilesReplaceTransport struct {
+	postPaths   []string
+	versionBody []byte
+}
+
+func (t *mockFilesReplaceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	header := make(http.Header)
+	header.Set("Content-Type", "application/json")
+	respond := func(status int, body string) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: status,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     header,
+		}, nil
+	}
+
+	path := req.URL.Path
+	switch {
+	case req.Method == http.MethodPost && strings.Contains(path, "/attachments.json"):
+		t.postPaths = append(t.postPaths, path)
+		return respond(201, `{"attachable_sgid":"sgid-v2"}`)
+	case req.Method == http.MethodPost && strings.HasSuffix(path, "/uploads/789/versions.json"):
+		t.postPaths = append(t.postPaths, path)
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("reading version body: %w", err)
+		}
+		t.versionBody = body
+		return respond(201, `{"id":789,"title":"report","filename":"report-v2.pdf","byte_size":9}`)
+	default:
+		return nil, fmt.Errorf("unexpected request: %s %s", req.Method, path)
+	}
+}
+
+// TestFilesReplaceStagesAndCreatesVersion pins the two-step flow and the
+// carry-forward default: no --description means no description key on the
+// wire, which the server reads as "keep the current one".
+func TestFilesReplaceStagesAndCreatesVersion(t *testing.T) {
+	transport := &mockFilesReplaceTransport{}
+	app := showTestApp(t, transport)
+
+	cmd := NewFilesCmd()
+	err := executeMessagesCommand(cmd, app, "replace", "789", writeTempUpload(t))
+	require.NoError(t, err)
+
+	require.Len(t, transport.postPaths, 2)
+	assert.Contains(t, transport.postPaths[0], "/attachments.json")
+	assert.Contains(t, transport.postPaths[1], "/uploads/789/versions.json")
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(transport.versionBody, &body))
+	assert.Equal(t, "sgid-v2", body["attachable_sgid"])
+	_, hasDescription := body["description"]
+	assert.False(t, hasDescription, "omitted --description must not reach the wire")
+	_, hasNotify := body["notify"]
+	assert.False(t, hasNotify, "no notify field means notify nobody")
+	_, hasBaseName := body["base_name"]
+	assert.False(t, hasBaseName, "omitted --base-name keeps the uploaded filename")
+}
+
+// TestFilesReplaceAcceptsURL verifies a pasted upload URL resolves to the
+// same versions endpoint as the bare ID.
+func TestFilesReplaceAcceptsURL(t *testing.T) {
+	transport := &mockFilesReplaceTransport{}
+	app := showTestApp(t, transport)
+
+	cmd := NewFilesCmd()
+	err := executeMessagesCommand(cmd, app, "replace", "https://3.basecamp.com/99999/buckets/456/uploads/789", writeTempUpload(t))
+	require.NoError(t, err)
+	require.Len(t, transport.postPaths, 2)
+	assert.Contains(t, transport.postPaths[1], "/uploads/789/versions.json")
+}
+
+// TestFilesReplaceRejectsBeforeStaging pins that every locally-detectable
+// problem — a URL for a different account, a non-positive ID, a description
+// whose local image reference doesn't resolve — fails before ANY request is
+// made, so a large replacement is never transferred toward a doomed call.
+func TestFilesReplaceRejectsBeforeStaging(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+	}{
+		"foreign-account URL": {
+			args: []string{"replace", "https://3.basecamp.com/12345/buckets/456/uploads/789", ""},
+		},
+		"zero upload ID": {
+			args: []string{"replace", "0", ""},
+		},
+		"unresolvable description image": {
+			args: []string{"replace", "789", "", "--description", "![preview](missing-image-file.png)"},
+		},
+		"same-account URL of another recording type": {
+			args: []string{"replace", "https://3.basecamp.com/99999/buckets/456/todos/789", ""},
+		},
+		"uploads collection URL (vault-scoped)": {
+			args: []string{"replace", "https://3.basecamp.com/99999/buckets/456/vaults/555/uploads", ""},
+		},
+		"untrusted host with matching account and path": {
+			args: []string{"replace", "https://evil.example/99999/buckets/456/uploads/789", ""},
+		},
+		"description mixing a valid and a missing image": {
+			// The valid image must NOT upload before the missing one is
+			// discovered — resolveLocalImages preflights every reference.
+			args: []string{"replace", "789", "", "--description", "![gone](missing-image-file.png) and ![ok](VALID_IMAGE)"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			transport := &mockFilesReplaceTransport{}
+			app := showTestApp(t, transport)
+
+			args := tc.args
+			args[2] = writeTempUpload(t)
+			for i, a := range args {
+				if strings.Contains(a, "VALID_IMAGE") {
+					img := filepath.Join(t.TempDir(), "ok.png")
+					require.NoError(t, os.WriteFile(img, []byte("png-bytes"), 0o644))
+					args[i] = strings.ReplaceAll(a, "VALID_IMAGE", img)
+				}
+			}
+			cmd := NewFilesCmd()
+			err := executeMessagesCommand(cmd, app, args...)
+			require.Error(t, err)
+			assert.Empty(t, transport.postPaths, "nothing may be staged or mutated")
+		})
+	}
+}
+
+// TestScopeProject pins breadcrumb scope sourcing: the group flag wins, the
+// root-level --project (app.Flags.Project) fills in behind it, and the config
+// default is deliberately absent — a copier's own config supplies that one.
+func TestScopeProject(t *testing.T) {
+	app := &appctx.App{Flags: appctx.GlobalFlags{Project: "root-flag"}}
+	assert.Equal(t, "group-flag", scopeProject(app, "group-flag"))
+	assert.Equal(t, "root-flag", scopeProject(app, ""))
+	app.Flags.Project = ""
+	assert.Equal(t, "", scopeProject(app, ""))
+}
+
+// TestShellQuote pins the breadcrumb encoding: inert strings (IDs, plain
+// Basecamp URLs) pass bare, and everything else is single-quoted so no shell
+// syntax survives — quoting is an encoding, not a metacharacter list.
+func TestShellQuote(t *testing.T) {
+	for input, want := range map[string]string{
+		"789": "789",
+		"https://3.basecamp.com/99999/buckets/456/uploads/789":                  "https://3.basecamp.com/99999/buckets/456/uploads/789",
+		"https://3.basecamp.com/99999/buckets/456/uploads/789?x=$(touch pwned)": `'https://3.basecamp.com/99999/buckets/456/uploads/789?x=$(touch pwned)'`,
+		"release;id":         `'release;id'`,
+		"$(command) project": `'$(command) project'`,
+		"My Project":         `'My Project'`,
+		"O'Brien's":          `'O'\''Brien'\''s'`,
+		"":                   `''`,
+	} {
+		assert.Equal(t, want, shellQuote(input), "shellQuote(%q)", input)
+	}
+}
+
+// TestFilesReplaceBaseNameReachesTheWire pins --base-name: the rename travels
+// as base_name (the server keeps the staged file's extension), and omitting
+// the flag keeps the field off the wire so the uploaded name stands.
+func TestFilesReplaceBaseNameReachesTheWire(t *testing.T) {
+	transport := &mockFilesReplaceTransport{}
+	app := showTestApp(t, transport)
+
+	cmd := NewFilesCmd()
+	err := executeMessagesCommand(cmd, app, "replace", "789", writeTempUpload(t), "--base-name", "build-v2")
+	require.NoError(t, err)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(transport.versionBody, &body))
+	assert.Equal(t, "build-v2", body["base_name"])
+}
+
+// TestFilesReplaceDescriptionTriState pins the presence-aware description:
+// a provided value is sent as HTML, an explicit empty string is sent (and
+// clears server-side), and omission stays off the wire (covered above).
+func TestFilesReplaceDescriptionTriState(t *testing.T) {
+	for name, tc := range map[string]struct {
+		flagValue string
+		expect    func(t *testing.T, desc any)
+	}{
+		"markdown value becomes HTML": {
+			flagValue: "New **build**",
+			expect: func(t *testing.T, desc any) {
+				assert.Contains(t, desc, "<strong>build</strong>")
+			},
+		},
+		"explicit empty clears": {
+			flagValue: "",
+			expect: func(t *testing.T, desc any) {
+				assert.Equal(t, "", desc)
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			transport := &mockFilesReplaceTransport{}
+			app := showTestApp(t, transport)
+
+			cmd := NewFilesCmd()
+			err := executeMessagesCommand(cmd, app, "replace", "789", writeTempUpload(t), "--description", tc.flagValue)
+			require.NoError(t, err)
+
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(transport.versionBody, &body))
+			desc, hasDescription := body["description"]
+			require.True(t, hasDescription, "--description must reach the wire")
+			tc.expect(t, desc)
+		})
+	}
+}
+
 // TestFilesVersionsRejectsConflictingPagination pins the same pagination
 // contract the other bounded listings use: --page disables the walk, so it
 // cannot be combined with --all or --limit, and only page 1 is reachable.
