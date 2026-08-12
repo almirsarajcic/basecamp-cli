@@ -287,6 +287,22 @@ func TestFilesUpdateDocumentEmptyContentClearsWhilePreservingTitle(t *testing.T)
 	assert.False(t, hasContent)
 }
 
+// A Replace that omits both fields is rejected by the SDK and by BC3, so the
+// CLI fails fast as a usage error — before any request is spent.
+func TestFilesUpdateDocumentRejectsClearingBothFields(t *testing.T) {
+	transport := &mockFilesUpdateTransport{}
+	app := showTestApp(t, transport)
+	app.Config.ProjectID = "456"
+
+	cmd := NewFilesCmd()
+	err := executeMessagesCommand(cmd, app, "update", "999", "--type", "document", "--title", "", "--content", "")
+	require.Error(t, err)
+	var outErr *output.Error
+	require.True(t, errors.As(err, &outErr))
+	assert.Equal(t, output.CodeUsage, outErr.Code)
+	assert.Empty(t, transport.capturedBody, "no write request may reach the wire")
+}
+
 func TestFilesUpdateTypeWithoutChangesShowsHelp(t *testing.T) {
 	app, _ := setupMessagesTestApp(t)
 	app.Config.ProjectID = "456"
@@ -1235,4 +1251,124 @@ func TestFilesGroupSpellingsGetHonestAccountWideSemantics(t *testing.T) {
 		require.NoError(t, executeRecordingCommand(NewFilesCmd(), app, "list", "--all-projects"))
 		assert.NotContains(t, transport.last(t).Query, "kind=")
 	})
+}
+
+// mockUploadVersionsTransport serves the versions listing for upload 789 and
+// records every path it is asked for, so a stray call to the wrong endpoint
+// fails the test instead of passing on a lucky response.
+type mockUploadVersionsTransport struct {
+	requests []string
+}
+
+func (t *mockUploadVersionsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.requests = append(t.requests, req.Method+" "+req.URL.Path)
+
+	header := make(http.Header)
+	header.Set("Content-Type", "application/json")
+
+	if req.Method != http.MethodGet || !strings.HasSuffix(req.URL.Path, "/uploads/789/versions.json") {
+		return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+	}
+
+	// The body is the shape production serves (captured from a live canary of
+	// bc3's versions partial): reverse-chronological version EVENTS, the file
+	// each one recorded nested under "upload", exactly one of them current.
+	return &http.Response{
+		StatusCode: 200,
+		Body: io.NopCloser(strings.NewReader(
+			`[{"id":791,"recording_id":789,"action":"blob_changed","created_at":"2026-08-11T21:11:00Z","creator":{"id":1,"name":"Clawdito"},"upload":{"filename":"report-v2.pdf","content_type":"application/pdf","byte_size":109,"download_url":"https://example.test/v2","app_download_url":"https://example.test/app/v2","current":true}},{"id":790,"recording_id":789,"action":"created","created_at":"2026-08-11T21:10:00Z","creator":{"id":1,"name":"Clawdito"},"upload":{"filename":"report.pdf","content_type":"application/pdf","byte_size":73,"download_url":"https://example.test/v1","app_download_url":"https://example.test/app/v1","current":false}}]`,
+		)),
+		Header: header,
+	}, nil
+}
+
+// TestFilesVersionsListsUploadVersions verifies the command reaches the
+// account-level versions endpoint — no project scope, no extra lookups.
+func TestFilesVersionsListsUploadVersions(t *testing.T) {
+	transport := &mockUploadVersionsTransport{}
+	app := showTestApp(t, transport)
+
+	cmd := NewFilesCmd()
+	err := executeMessagesCommand(cmd, app, "versions", "789")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"GET /99999/uploads/789/versions.json"}, transport.requests)
+}
+
+// TestFilesVersionsAcceptsURL verifies a pasted upload URL resolves to the
+// same request as the bare ID.
+func TestFilesVersionsAcceptsURL(t *testing.T) {
+	transport := &mockUploadVersionsTransport{}
+	app := showTestApp(t, transport)
+
+	cmd := NewFilesCmd()
+	err := executeMessagesCommand(cmd, app, "versions", "https://3.basecamp.com/99999/buckets/456/uploads/789")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"GET /99999/uploads/789/versions.json"}, transport.requests)
+}
+
+// TestFlattenUploadVersionsCarriesTheRecordedFile pins the display contract
+// for version events: the file each event recorded surfaces from the nested
+// upload, exactly one row is current, and the row id is the event's — there
+// is deliberately no row field carrying an id that `files show` would 404 on.
+func TestFlattenUploadVersionsCarriesTheRecordedFile(t *testing.T) {
+	byteSize := int64(73)
+	rows := flattenUploadVersions([]basecamp.UploadVersion{
+		{
+			ID: 791, Action: "blob_changed",
+			Creator: basecamp.Person{Name: "Clawdito"},
+			Upload: &basecamp.UploadVersionFile{
+				Filename: "report-v2.pdf", Current: true,
+				DownloadURL: "https://example.test/v2",
+			},
+		},
+		{
+			ID: 790, Action: "created",
+			Creator: basecamp.Person{Name: "Clawdito"},
+			Upload: &basecamp.UploadVersionFile{
+				Filename: "report.pdf", ByteSize: &byteSize, Current: false,
+				DownloadURL: "https://example.test/v1",
+			},
+		},
+		// A deleted recordable leaves the event behind with no upload at all.
+		{ID: 780, Action: "created", Creator: basecamp.Person{Name: "Clawdito"}},
+	})
+
+	require.Len(t, rows, 3)
+	assert.Equal(t, int64(791), rows[0]["id"], "row id is the version event's id")
+	assert.Equal(t, "report-v2.pdf", rows[0]["filename"])
+	assert.Equal(t, "Clawdito", rows[0]["creator"], "creator flattens to the name")
+
+	currents := 0
+	for _, row := range rows {
+		if cur, ok := row["current"].(bool); ok && cur {
+			currents++
+		}
+	}
+	assert.Equal(t, 1, currents, "exactly one version is current")
+
+	assert.Equal(t, int64(73), rows[1]["byte_size"])
+	assert.NotContains(t, rows[2], "filename", "an upload-less event gets no file columns")
+	assert.NotContains(t, rows[2], "current", "an upload-less event gets no file columns")
+}
+
+// TestFilesVersionsRejectsConflictingPagination pins the same pagination
+// contract the other bounded listings use: --page disables the walk, so it
+// cannot be combined with --all or --limit, and only page 1 is reachable.
+func TestFilesVersionsRejectsConflictingPagination(t *testing.T) {
+	for name, args := range map[string][]string{
+		"--all with --limit": {"versions", "789", "--all", "--limit", "5"},
+		"--page with --all":  {"versions", "789", "--page", "1", "--all"},
+		"--page beyond 1":    {"versions", "789", "--page", "2"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			transport := &mockUploadVersionsTransport{}
+			app := showTestApp(t, transport)
+
+			err := executeMessagesCommand(NewFilesCmd(), app, args...)
+			require.Error(t, err)
+			assert.Empty(t, transport.requests, "must refuse before any request")
+		})
+	}
 }
