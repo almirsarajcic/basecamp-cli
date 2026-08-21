@@ -428,11 +428,6 @@ func newScheduleCreateCmd(project, scheduleID *string) *cobra.Command {
 				return missingArg(cmd, "<summary>")
 			}
 
-			app := appctx.FromContext(cmd.Context())
-			if err := ensureAccount(cmd, app); err != nil {
-				return err
-			}
-
 			if startsAt == "" {
 				return output.ErrUsage("--starts-at required (ISO 8601 datetime)")
 			}
@@ -446,6 +441,31 @@ func newScheduleCreateCmd(project, scheduleID *string) *cobra.Command {
 				return err
 			}
 
+			if err := rejectSubscribeConflict(cmd.Flags().Changed("subscribe"), noSubscribe); err != nil {
+				return err
+			}
+			if err := requireNumericID(*scheduleID, "schedule ID"); err != nil {
+				return err
+			}
+
+			// Attachment paths are readable or not regardless of the body, so
+			// check them before the pipe is drained.
+			if err := validateAttachPaths(attachFiles); err != nil {
+				return err
+			}
+
+			// Local validation, then "-", then account: a bad stdin gets the
+			// stdin error rather than "--account is required".
+			description, err := resolveContentValue(cmd, description, -1, "--description")
+			if err != nil {
+				return err
+			}
+
+			app := appctx.FromContext(cmd.Context())
+			if err := ensureAccount(cmd, app); err != nil {
+				return err
+			}
+
 			return runScheduleCreate(cmd, app, *project, *scheduleID, entrySummary, startsAt, endsAt, description, allDay, notify, visibleToClients, participants, subscribe, noSubscribe, attachFiles)
 		},
 	}
@@ -456,13 +476,15 @@ func newScheduleCreateCmd(project, scheduleID *string) *cobra.Command {
 	cmd.Flags().StringVar(&startsAt, "start", "", "Start time (alias)")
 	cmd.Flags().StringVar(&endsAt, "ends-at", "", "End time (ISO 8601)")
 	cmd.Flags().StringVar(&endsAt, "end", "", "End time (alias)")
-	cmd.Flags().StringVar(&description, "description", "", "Detailed description")
+	cmd.Flags().StringVar(&description, "description", "", "Detailed description; use - to read from stdin")
 	cmd.Flags().StringVar(&description, "desc", "", "Description (alias)")
 	cmd.Flags().BoolVar(&allDay, "all-day", false, "Mark as all-day event")
 	cmd.Flags().BoolVar(&notify, "notify", false, "Notify participants")
 	cmd.Flags().StringVar(&participants, "participants", "", "Comma-separated person IDs")
 	cmd.Flags().StringVar(&participants, "people", "", "Person IDs (alias)")
 	cmd.Flags().StringVar(&subscribe, "subscribe", "", "Subscribe specific people (comma-separated names, emails, IDs, or \"me\")")
+
+	allowDash(cmd, "flag:description", "flag:desc")
 	cmd.Flags().BoolVar(&noSubscribe, "no-subscribe", false, "Don't subscribe anyone else (silent, no notifications)")
 	cmd.Flags().StringArrayVar(&attachFiles, "attach", nil, "Attach file (repeatable)")
 	cmd.Flags().BoolVar(&visibleToClients, "visible-to-clients", false, "Make the schedule entry visible to clients on the project (omit for the server default; client-authenticated callers always post client-visible)")
@@ -613,12 +635,47 @@ You can pass either an entry ID or a Basecamp URL:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app := appctx.FromContext(cmd.Context())
-			if err := ensureAccount(cmd, app); err != nil {
+
+			// Extract ID and project from URL if provided. Purely syntactic,
+			// so it precedes the stdin read like every other target-ID check.
+			entryID, urlProjectID := extractWithProject(args[0])
+
+			// This command used to send a malformed ID to the server as 0 —
+			// the ParseInt further down discarded its error. Reject it here
+			// instead, like every sibling update command, and before the pipe
+			// is drained.
+			entryIDInt, err := strconv.ParseInt(entryID, 10, 64)
+			if err != nil {
+				return output.ErrUsage("Invalid schedule entry ID")
+			}
+
+			// The timestamp formats and the attachment paths are decidable from
+			// the flags alone, as they already are on the create path — so they
+			// precede the read rather than following account and project
+			// resolution.
+			if startsAt != "" {
+				if err := validateScheduleTimestamp("starts-at", startsAt); err != nil {
+					return err
+				}
+			}
+			if endsAt != "" {
+				if err := validateScheduleTimestamp("ends-at", endsAt); err != nil {
+					return err
+				}
+			}
+			if err := validateAttachPaths(attachFiles); err != nil {
 				return err
 			}
 
-			// Extract ID and project from URL if provided
-			entryID, urlProjectID := extractWithProject(args[0])
+			// Syntactic checks first, then "-", then account and network.
+			description, err = resolveContentValue(cmd, description, -1, "--description")
+			if err != nil {
+				return err
+			}
+
+			if err := ensureAccount(cmd, app); err != nil {
+				return err
+			}
 
 			// Resolve project - use URL > flag > config, with interactive fallback
 			projectID := *project
@@ -643,8 +700,6 @@ You can pass either an entry ID or a Basecamp URL:
 				return err
 			}
 
-			entryIDInt, _ := strconv.ParseInt(entryID, 10, 64)
-
 			// Build request with provided fields only
 			req := &basecamp.UpdateScheduleEntryRequest{}
 			hasChanges := false
@@ -654,16 +709,10 @@ You can pass either an entry ID or a Basecamp URL:
 				hasChanges = true
 			}
 			if startsAt != "" {
-				if err := validateScheduleTimestamp("starts-at", startsAt); err != nil {
-					return err
-				}
 				req.StartsAt = basecamp.Ptr(startsAt)
 				hasChanges = true
 			}
 			if endsAt != "" {
-				if err := validateScheduleTimestamp("ends-at", endsAt); err != nil {
-					return err
-				}
 				req.EndsAt = basecamp.Ptr(endsAt)
 				hasChanges = true
 			}
@@ -764,13 +813,15 @@ You can pass either an entry ID or a Basecamp URL:
 	cmd.Flags().StringVar(&startsAt, "start", "", "Start time (alias)")
 	cmd.Flags().StringVar(&endsAt, "ends-at", "", "End time (ISO 8601)")
 	cmd.Flags().StringVar(&endsAt, "end", "", "End time (alias)")
-	cmd.Flags().StringVar(&description, "description", "", "Detailed description")
+	cmd.Flags().StringVar(&description, "description", "", "Detailed description; use - to read from stdin")
 	cmd.Flags().StringVar(&description, "desc", "", "Description (alias)")
 	cmd.Flags().BoolVar(&allDay, "all-day", false, "Mark as all-day event")
 	cmd.Flags().BoolVar(&notify, "notify", false, "Notify participants")
 	cmd.Flags().StringVar(&participants, "participants", "", "Comma-separated person IDs")
 	cmd.Flags().StringVar(&participants, "people", "", "Person IDs (alias)")
 	cmd.Flags().StringArrayVar(&attachFiles, "attach", nil, "Attach file (repeatable)")
+
+	allowDash(cmd, "flag:description", "flag:desc")
 
 	return cmd
 }

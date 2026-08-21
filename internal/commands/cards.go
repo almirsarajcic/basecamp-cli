@@ -851,9 +851,15 @@ func newCardsCreateCmd(project, cardTable *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create <title> [body]",
 		Short: "Create a new card",
-		Long:  "Create a new card in a project's card table.",
+		Long: `Create a new card in a project's card table.
+
+Use - as the body argument to read the body from stdin:
+  printf 'Card body' | basecamp cards create "My card" - --in myproject`,
 		Example: `  basecamp cards create "My card" --in myproject
   basecamp cards create --in myproject -- "--title with dashes"`,
+		// Bounded so a stray third token is a usage error rather than being
+		// silently dropped after "-" has already drained stdin.
+		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Show help when invoked with no title
 			if len(args) == 0 {
@@ -864,21 +870,33 @@ func newCardsCreateCmd(project, cardTable *string) *cobra.Command {
 			if strings.TrimSpace(title) == "" {
 				return cmd.Help()
 			}
+			// A named column needs --card-table to resolve against, and that is
+			// knowable from the flags alone. Attachment paths are readable or
+			// not regardless of the body. Both precede the read, so a doomed
+			// invocation never costs the caller a drained pipe.
+			if column != "" && !isNumericID(column) && *cardTable == "" {
+				return output.ErrUsage("--card-table is required when using --column with a name")
+			}
+			if err := requireNumericID(*cardTable, "card table ID"); err != nil {
+				return err
+			}
+			if err := validateAttachPaths(attachFiles); err != nil {
+				return err
+			}
+
 			var content string
 			if len(args) > 1 {
-				content = args[1]
+				var err error
+				content, err = resolveContentValue(cmd, args[1], 1, "[body]")
+				if err != nil {
+					return err
+				}
 			}
 
 			app := appctx.FromContext(cmd.Context())
 
 			if err := ensureAccount(cmd, app); err != nil {
 				return err
-			}
-
-			// Column name (non-numeric) requires --card-table for resolution
-			// Numeric column IDs can be used directly without card table discovery
-			if column != "" && !isNumericID(column) && *cardTable == "" {
-				return output.ErrUsage("--card-table is required when using --column with a name")
 			}
 
 			// Resolve project, with interactive fallback
@@ -1051,6 +1069,8 @@ func newCardsCreateCmd(project, cardTable *string) *cobra.Command {
 	cmd.Flags().StringVar(&assignee, "to", "", "Assignee (alias for --assignee)")
 	cmd.Flags().StringArrayVar(&attachFiles, "attach", nil, "Attach file (repeatable)")
 
+	allowDash(cmd, "arg:1")
+
 	completer := completion.NewCompleter(nil)
 	_ = cmd.RegisterFlagCompletionFunc("assignee", completer.PeopleNameCompletion())
 	_ = cmd.RegisterFlagCompletionFunc("to", completer.PeopleNameCompletion())
@@ -1079,12 +1099,6 @@ You can pass either a card ID or a Basecamp URL:
 				return noChanges(cmd)
 			}
 
-			app := appctx.FromContext(cmd.Context())
-
-			if err := ensureAccount(cmd, app); err != nil {
-				return err
-			}
-
 			// Extract ID from URL if provided
 			cardIDStr := extractID(args[0])
 
@@ -1093,10 +1107,31 @@ You can pass either a card ID or a Basecamp URL:
 				return output.ErrUsage("Invalid card ID")
 			}
 
+			// Attachment paths are readable or not regardless of the body, so
+			// check them before the pipe is drained.
+			if err := validateAttachPaths(attachFiles); err != nil {
+				return err
+			}
+
+			// Syntactic checks first, then "-", then account and network: a
+			// malformed ID is answered without waiting on the producer, and a
+			// blank pipe cannot mask it.
+			content, err := resolveContentValue(cmd, content, -1, "--body")
+			if err != nil {
+				return err
+			}
+
+			app := appctx.FromContext(cmd.Context())
+
+			if err := ensureAccount(cmd, app); err != nil {
+				return err
+			}
+
 			req := &basecamp.UpdateCardRequest{}
 			if title != "" {
 				req.Title = &title
 			}
+
 			var mentionNotice string
 			var html string
 			if content != "" {
@@ -1160,7 +1195,7 @@ You can pass either a card ID or a Basecamp URL:
 	}
 
 	cmd.Flags().StringVarP(&title, "title", "t", "", "New title")
-	cmd.Flags().StringVarP(&content, "body", "b", "", "New body content")
+	cmd.Flags().StringVarP(&content, "body", "b", "", "New body content; use - to read from stdin")
 	cmd.Flags().StringVarP(&due, "due", "d", "", "Due date (natural language or YYYY-MM-DD)")
 	cmd.Flags().StringVar(&assignee, "assignee", "", "Assignee ID or name")
 	cmd.Flags().StringArrayVar(&attachFiles, "attach", nil, "Attach file (repeatable)")
@@ -1168,6 +1203,8 @@ You can pass either a card ID or a Basecamp URL:
 	// Register tab completion for assignee flag
 	completer := completion.NewCompleter(nil)
 	_ = cmd.RegisterFlagCompletionFunc("assignee", completer.PeopleNameCompletion())
+
+	allowDash(cmd, "flag:body")
 
 	return cmd
 }
@@ -2022,6 +2059,15 @@ func newCardsColumnCreateCmd(project, cardTable *string) *cobra.Command {
 
 			app := appctx.FromContext(cmd.Context())
 
+			if err := requireNumericID(*cardTable, "card table ID"); err != nil {
+				return err
+			}
+
+			description, err := resolveContentValue(cmd, description, -1, "--description")
+			if err != nil {
+				return err
+			}
+
 			if err := ensureAccount(cmd, app); err != nil {
 				return err
 			}
@@ -2085,7 +2131,9 @@ func newCardsColumnCreateCmd(project, cardTable *string) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&description, "description", "d", "", "Column description")
+	cmd.Flags().StringVarP(&description, "description", "d", "", "Column description; use - to read from stdin")
+
+	allowDash(cmd, "flag:description")
 
 	return cmd
 }
@@ -2108,17 +2156,23 @@ You can pass either a column ID or a Basecamp URL:
 				return noChanges(cmd)
 			}
 
-			app := appctx.FromContext(cmd.Context())
-
-			if err := ensureAccount(cmd, app); err != nil {
-				return err
-			}
-
 			// Extract ID from URL if provided
 			columnIDStr := extractID(args[0])
 			columnID, err := strconv.ParseInt(columnIDStr, 10, 64)
 			if err != nil {
 				return output.ErrUsage("Invalid column ID")
+			}
+
+			// Syntactic checks first, then "-", then account and network.
+			description, err := resolveContentValue(cmd, description, -1, "--description")
+			if err != nil {
+				return err
+			}
+
+			app := appctx.FromContext(cmd.Context())
+
+			if err := ensureAccount(cmd, app); err != nil {
+				return err
 			}
 
 			req := &basecamp.UpdateColumnRequest{
@@ -2138,7 +2192,9 @@ You can pass either a column ID or a Basecamp URL:
 	}
 
 	cmd.Flags().StringVarP(&title, "title", "t", "", "New title")
-	cmd.Flags().StringVarP(&description, "description", "d", "", "New description")
+	cmd.Flags().StringVarP(&description, "description", "d", "", "New description; use - to read from stdin")
+
+	allowDash(cmd, "flag:description")
 
 	return cmd
 }

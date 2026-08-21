@@ -80,17 +80,33 @@ No project is needed — attachment upload is account-scoped.`,
 	return cmd
 }
 
+// validateAttachPaths checks every --attach path is readable. It needs no
+// account and no network, so commands that also read a "-" content input run it
+// first: an unreadable attachment dooms the invocation, and draining the pipe
+// for it makes the caller wait on a producer whose output is discarded — or
+// lets a blank pipe answer "stdin is empty" instead of naming the file.
+func validateAttachPaths(paths []string) error {
+	for _, path := range paths {
+		if err := richtext.ValidateFile(richtext.NormalizeDragPath(path)); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	return nil
+}
+
 // uploadAttachments uploads each path and returns attachment references.
 // Sequential, fails on first error.
 func uploadAttachments(cmd *cobra.Command, app *appctx.App, paths []string) ([]richtext.AttachmentRef, error) {
+	// Callers that read stdin run this first; repeating it here is idempotent
+	// and keeps this function correct on its own.
+	if err := validateAttachPaths(paths); err != nil {
+		return nil, err
+	}
+
 	refs := make([]richtext.AttachmentRef, 0, len(paths))
 
 	for _, path := range paths {
 		normalized := richtext.NormalizeDragPath(path)
-
-		if err := richtext.ValidateFile(normalized); err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
 
 		contentType := richtext.DetectMIME(normalized)
 		filename := filepath.Base(normalized)

@@ -431,7 +431,13 @@ func newMessagesCreateCmd(project *string, messageBoard *string) *cobra.Command 
 	cmd := &cobra.Command{
 		Use:   "create <title> [body]",
 		Short: "Create a new message",
-		Long:  "Post a new message to a project's message board.",
+		Long: `Post a new message to a project's message board.
+
+Use - as the body argument to read the body from stdin:
+  printf 'Long **Markdown** body' | basecamp messages create "Title" -`,
+		// Bounded so a stray third token is a usage error rather than being
+		// silently dropped after "-" has already drained stdin.
+		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Show help when invoked with no title
 			if len(args) == 0 {
@@ -449,9 +455,28 @@ func newMessagesCreateCmd(project *string, messageBoard *string) *cobra.Command 
 				return cmd.Help()
 			}
 
-			// Validate user input first, before checking account
+			// Validate user input first, before checking account. The --edit
+			// exclusion runs before "-" resolution so --edit … - errors
+			// without consuming stdin.
 			if edit && body != "" {
 				return output.ErrUsage("cannot combine --edit and body argument")
+			}
+			if err := rejectSubscribeConflict(cmd.Flags().Changed("subscribe"), noSubscribe); err != nil {
+				return err
+			}
+			if err := requireNumericID(*messageBoard, "message board ID"); err != nil {
+				return err
+			}
+			// Attachment paths are readable or not regardless of the body, so
+			// check them before the pipe is drained.
+			if err := validateAttachPaths(attachFiles); err != nil {
+				return err
+			}
+
+			var err error
+			body, err = resolveContentValue(cmd, body, 1, "[body]")
+			if err != nil {
+				return err
 			}
 			if edit {
 				fi, err := os.Stdin.Stat()
@@ -591,6 +616,8 @@ func newMessagesCreateCmd(project *string, messageBoard *string) *cobra.Command 
 	cmd.Flags().StringArrayVar(&attachFiles, "attach", nil, "Attach file (repeatable)")
 	cmd.Flags().BoolVar(&visibleToClients, "visible-to-clients", false, "Make the message visible to clients on the project (omit for the server default; client-authenticated callers always post client-visible)")
 
+	allowDash(cmd, "arg:1")
+
 	return cmd
 }
 
@@ -612,18 +639,26 @@ You can pass either a message ID or a Basecamp URL:
 				return noChanges(cmd)
 			}
 
-			app := appctx.FromContext(cmd.Context())
-
-			if err := ensureAccount(cmd, app); err != nil {
-				return err
-			}
-
 			// Extract ID from URL if provided
 			messageIDStr := extractID(args[0])
 
 			messageID, err := strconv.ParseInt(messageIDStr, 10, 64)
 			if err != nil {
 				return output.ErrUsage("Invalid message ID")
+			}
+
+			// Syntactic checks first, then "-", then account and network: a
+			// malformed ID is answered without waiting on the producer, and a
+			// blank pipe cannot mask it.
+			body, err = resolveContentValue(cmd, body, -1, "--body")
+			if err != nil {
+				return err
+			}
+
+			app := appctx.FromContext(cmd.Context())
+
+			if err := ensureAccount(cmd, app); err != nil {
+				return err
 			}
 
 			// Build SDK request
@@ -672,7 +707,9 @@ You can pass either a message ID or a Basecamp URL:
 	}
 
 	cmd.Flags().StringVarP(&title, "title", "t", "", "New title")
-	cmd.Flags().StringVarP(&body, "body", "b", "", "New body content")
+	cmd.Flags().StringVarP(&body, "body", "b", "", "New body content; use - to read from stdin")
+
+	allowDash(cmd, "flag:body")
 
 	return cmd
 }

@@ -1269,7 +1269,23 @@ func newCheckinsAnswerCreateCmd(project *string) *cobra.Command {
 			}
 
 			questionID := args[0]
-			content := strings.Join(args[1:], " ")
+
+			// Decidable from the arguments alone, so it precedes the read; the
+			// project-resolution path parses it again once the project is known.
+			if _, err := strconv.ParseInt(questionID, 10, 64); err != nil {
+				return output.ErrUsage("Invalid question ID")
+			}
+
+			// Attachment paths are readable or not regardless of the body, so
+			// check them before the pipe is drained.
+			if err := validateAttachPaths(attachFiles); err != nil {
+				return err
+			}
+
+			content, err := resolveContentArg(cmd, args[1:], 1)
+			if err != nil {
+				return err
+			}
 
 			app := appctx.FromContext(cmd.Context())
 
@@ -1359,6 +1375,8 @@ func newCheckinsAnswerCreateCmd(project *string) *cobra.Command {
 	cmd.Flags().StringVar(&groupOn, "date", "", "Date to group answer (ISO 8601, e.g., 2024-01-22; defaults to today)")
 	cmd.Flags().StringArrayVar(&attachFiles, "attach", nil, "Attach file (repeatable)")
 
+	allowDash(cmd, "arg:1+")
+
 	return cmd
 }
 
@@ -1381,7 +1399,16 @@ You can pass either an answer ID or a Basecamp URL:
 			// Extract ID and project from URL if provided
 			answerIDStr, urlProjectID := extractWithProject(args[0])
 
-			content := strings.Join(args[1:], " ")
+			// Decidable from the arguments alone, so it precedes the read; the
+			// project-resolution path parses it again once the project is known.
+			if _, err := strconv.ParseInt(answerIDStr, 10, 64); err != nil {
+				return output.ErrUsage("Invalid answer ID")
+			}
+
+			content, err := resolveContentArg(cmd, args[1:], 1)
+			if err != nil {
+				return err
+			}
 
 			app := appctx.FromContext(cmd.Context())
 
@@ -1460,6 +1487,8 @@ You can pass either an answer ID or a Basecamp URL:
 			)
 		},
 	}
+
+	allowDash(cmd, "arg:1+")
 
 	return cmd
 }

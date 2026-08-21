@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/basecamp/basecamp-sdk/go/pkg/basecamp"
 	"github.com/itchyny/gojq"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -20,6 +22,8 @@ import (
 	"github.com/basecamp/basecamp-cli/internal/harness"
 	"github.com/basecamp/basecamp-cli/internal/hostutil"
 	"github.com/basecamp/basecamp-cli/internal/output"
+	"github.com/basecamp/basecamp-cli/internal/richtext"
+	"github.com/basecamp/basecamp-cli/internal/stdinarg"
 	"github.com/basecamp/basecamp-cli/internal/tui"
 	"github.com/basecamp/basecamp-cli/internal/version"
 )
@@ -352,6 +356,12 @@ func Execute() {
 	cmd.AddCommand(commands.NewBonfireCmd())
 	cmd.AddCommand(commands.NewAgentHookCmd())
 
+	// Tier-2 stdin guard: reject a stray literal "-" when stdin is piped,
+	// everywhere a command doesn't explicitly accept it — except cobra's
+	// generated meta commands, which are deliberately exempt (see
+	// commands.InstallDashGuard).
+	commands.InstallDashGuard(cmd)
+
 	// Use ExecuteC to get the executed command (for correct context access)
 	executedCmd, err := cmd.ExecuteC()
 
@@ -387,12 +397,27 @@ func Execute() {
 		disableJQ := output.IsJQError(err)
 		if !disableJQ {
 			if app := appctx.FromContext(executedCmd.Context()); app != nil {
-				if writeErr := app.Err(err); writeErr == nil {
+				writeErr := app.Err(err)
+				if writeErr == nil {
 					os.Exit(output.ExitCodeFor(apiErr.Code))
 				}
-				// app.Err() write failed (e.g. jq runtime error on the error
-				// envelope, or broken pipe). Disable jq in the fallback writer
-				// to avoid replaying the same failure.
+
+				// The write failed. When a filter was in play it may already
+				// have emitted results — writeJQ streams each one as it is
+				// produced, so a filter like `.error, error("stop")` prints
+				// before it fails. Replaying the envelope on stdout would
+				// append a second, unfiltered document to the first, which is
+				// two incompatible outputs for the machine consumer the filter
+				// exists to serve. Once a jq-backed write has begun, stdout is
+				// final: report the failure on stderr and stop.
+				if jq, _ := cmd.PersistentFlags().GetString("jq"); jq != "" {
+					fmt.Fprintln(os.Stderr, jqRenderErrorDiagnostic(writeErr))
+					os.Exit(output.ExitCodeFor(apiErr.Code))
+				}
+
+				// No filter: nothing partial can have been written through one,
+				// so the plain fallback below is still the right last resort
+				// (e.g. a broken pipe).
 				disableJQ = true
 			}
 		}
@@ -430,6 +455,18 @@ func Execute() {
 			format = output.FormatJSON
 		}
 
+		// This path runs only when nothing has been written yet: either no app
+		// was available (an error raised before it was built) or no filter was
+		// in play. An unusable filter must not swallow the error — --jq is
+		// validated in the pre-run, so an error raised *before* that check
+		// would otherwise render through an unparseable filter and exit
+		// non-zero having printed nothing. Decide usability up front rather
+		// than retrying after a failed write, which is what the jq-backed path
+		// above refuses to do.
+		if jqFilter != "" && !jqUsable(jqFilter) {
+			jqFilter = ""
+		}
+
 		writer := output.New(output.Options{
 			Format:   format,
 			Writer:   os.Stdout,
@@ -439,6 +476,33 @@ func Execute() {
 
 		os.Exit(output.ExitCodeFor(apiErr.Code))
 	}
+}
+
+// jqUsable reports whether a filter parses and compiles. Only these failures
+// are knowable before any output is produced, which is what makes clearing the
+// filter safe: a filter that fails at runtime may already have written.
+func jqUsable(filter string) bool {
+	q, err := gojq.Parse(filter)
+	if err != nil {
+		return false
+	}
+	_, err = gojq.Compile(q, gojq.WithEnvironLoader(os.Environ))
+	return err == nil
+}
+
+// jqRenderErrorDiagnostic renders a terminal-safe, single-line explanation of
+// a failed jq-backed error write. A jq runtime error can include response data
+// selected by the filter, so it must not reach stderr verbatim.
+func jqRenderErrorDiagnostic(err error) string {
+	const prefix = "error rendering error output through --jq"
+	if err == nil {
+		return prefix
+	}
+	detail := richtext.SanitizeSingleLine(err.Error())
+	if detail == "" {
+		return prefix
+	}
+	return prefix + ": " + detail
 }
 
 // resolveProfile determines which profile to use.
@@ -513,8 +577,14 @@ func profileNames(cfg *config.Config) string {
 	return strings.Join(names, ", ")
 }
 
-// isInteractiveTTY returns true if stdout is a character device (e.g. a
-// terminal) and no noninteractive mode is set.
+// isInteractiveTTY reports whether the profile picker may run: no
+// noninteractive mode set, and both ends of stdio are character devices.
+//
+// Stdin counts because the picker is a TUI reading key events, and this runs
+// from PersistentPreRunE — before any command touches its own input. Gating on
+// stdout alone let "printf body | basecamp todos create -" open the picker on
+// a terminal stdout and consume the piped body as keystrokes. Same predicate
+// as App.IsInteractive and resolve.Resolver.IsInteractive.
 func isInteractiveTTY(flags appctx.GlobalFlags) bool {
 	if config.NonInteractiveEnv() {
 		return false
@@ -525,12 +595,7 @@ func isInteractiveTTY(flags appctx.GlobalFlags) bool {
 		return false
 	}
 
-	// Check if stdout is a character device (e.g. a terminal)
-	fi, err := os.Stdout.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
+	return stdinarg.InteractiveStdio()
 }
 
 // promptForProfile shows an interactive picker for profile selection.
@@ -614,9 +679,27 @@ func isMachineConsumer(root *cobra.Command) bool {
 	return false
 }
 
+// cobraArityError matches cobra's four arity messages exactly (ExactArgs,
+// MaximumNArgs, RangeArgs; MinimumNArgs is handled by an earlier rule). Anchored
+// so a command's own error that merely quotes the phrase is left alone.
+var cobraArityError = regexp.MustCompile(`^accepts (\d+|at most \d+|between \d+ and \d+) arg\(s\), received \d+$`)
+
 // transformCobraError transforms Cobra's default error messages to match the
 // Bash CLI format for consistency with existing tests and user expectations.
+//
+// Only untyped errors are rewritten. An error that already carries a code, an
+// HTTP status, a hint or a retryable flag is ours or the SDK's, and matching on
+// its rendered text would flatten that metadata into a bare usage string.
 func transformCobraError(err error) error {
+	var outErr *output.Error
+	if errors.As(err, &outErr) {
+		return err
+	}
+	var sdkErr *basecamp.Error
+	if errors.As(err, &sdkErr) {
+		return err
+	}
+
 	msg := err.Error()
 
 	// Transform "flag needs an argument: --FLAG" → "--FLAG requires a value"
@@ -657,6 +740,14 @@ func transformCobraError(err error) error {
 	// Transform "accepts N arg(s), received 0" → "ID required"
 	if strings.Contains(msg, "arg(s), received 0") {
 		return output.ErrUsage("ID required")
+	}
+
+	// Every other cobra arity message ("accepts at most 2 arg(s), received 3")
+	// is a usage error by construction — only the code was wrong, so agents
+	// branching on it saw api_error and could retry a call that will never
+	// succeed. The wording is already clear; keep it and fix the code.
+	if cobraArityError.MatchString(msg) {
+		return output.ErrUsage(msg)
 	}
 
 	// Transform "required flag(s) X not set" → more specific message
@@ -762,6 +853,12 @@ func emitAgentHelp(cmd *cobra.Command) {
 		}
 	}
 
+	// Synthesize the stdin note from the allow_dash annotation, so every
+	// command that accepts "-" auto-documents it.
+	if note := stdinDashNote(cmd, info.Args); note != "" {
+		info.Notes = append(info.Notes, note)
+	}
+
 	// Subcommands (include aliases so the CLI surface snapshot tracks them)
 	for _, sub := range cmd.Commands() {
 		if sub.IsAvailableCommand() || sub.Name() == "help" {
@@ -825,4 +922,35 @@ func emitAgentHelp(cmd *cobra.Command) {
 	})
 
 	_ = json.NewEncoder(cmd.OutOrStdout()).Encode(info)
+}
+
+// stdinDashNote renders the "-" (stdin) inputs a command accepts, from its
+// allow_dash annotation: positionals by their Use-string names, flags by
+// --name. Returns "" when the command reads no stdin input — --out's "-"
+// means stdout, so it never appears here.
+func stdinDashNote(cmd *cobra.Command, args []ArgInfo) string {
+	allow := stdinarg.ParseAllow(cmd.Annotations[stdinarg.AnnotationAllowDash])
+	if allow.Empty() {
+		return ""
+	}
+
+	var parts []string
+	for i, a := range args {
+		if allow.Arg(i) {
+			if a.Required {
+				parts = append(parts, "<"+a.Name+">")
+			} else {
+				parts = append(parts, "["+a.Name+"]")
+			}
+		}
+	}
+	for _, token := range strings.Fields(cmd.Annotations[stdinarg.AnnotationAllowDash]) {
+		if name, ok := strings.CutPrefix(token, "flag:"); ok && name != "out" {
+			parts = append(parts, "--"+name)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Pass - to read from stdin: " + strings.Join(parts, ", ")
 }

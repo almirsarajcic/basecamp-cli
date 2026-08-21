@@ -308,15 +308,54 @@ By default, messages are sent as plain text. Use --content-type text/html
 for rich text (HTML) messages.
 
 @mentions (@Name or @First.Last) are resolved automatically and the
-content type is promoted to text/html when mentions are present.`,
+content type is promoted to text/html when mentions are present.
+
+Use - as the message argument to read the message from stdin:
+  printf 'Build is green' | basecamp chat post - --in my-project`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app := appctx.FromContext(cmd.Context())
 
-			// Validate user input first, before checking account
+			// Validate user input first, before checking account. A
+			// positional and --content are the same input, so supplying both
+			// is rejected rather than one silently winning — with "-" in
+			// play, the losing source would discard piped content unread.
 			messageContent := content
+			argIndex, what := -1, "--content"
 			if len(args) > 0 {
+				if cmd.Flags().Changed("content") {
+					return output.ErrUsage("cannot combine a <message> argument with --content")
+				}
 				messageContent = args[0]
+				argIndex, what = 0, "<message>"
+			}
+
+			// An explicitly supplied --room must be numeric; when it is absent
+			// the room is resolved from the project, which needs the network.
+			// Check the supplied case here so a malformed room does not cost
+			// the caller a drained pipe. Same for the content mode, which chat
+			// update already checks before its own read.
+			if *chatID != "" {
+				if _, err := strconv.ParseInt(*chatID, 10, 64); err != nil {
+					return output.ErrUsage("Invalid chat room ID")
+				}
+			}
+			switch *contentType {
+			case "", "text/html", "text/plain":
+			default:
+				return output.ErrUsage(fmt.Sprintf("unsupported --content-type %q (expected text/html or text/plain)", *contentType))
+			}
+
+			// Attachment paths are readable or not regardless of the body, so
+			// check them before the pipe is drained.
+			if err := validateAttachPaths(attachFiles); err != nil {
+				return err
+			}
+
+			var err error
+			messageContent, err = resolveContentValue(cmd, messageContent, argIndex, what)
+			if err != nil {
+				return err
 			}
 
 			// Show help when invoked with no message content
@@ -332,9 +371,11 @@ content type is promoted to text/html when mentions are present.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&content, "content", "", "Message content")
+	cmd.Flags().StringVar(&content, "content", "", "Message content; use - to read from stdin")
 	cmd.Flags().StringVar(contentType, "content-type", "", "Content type (text/html for rich text)")
 	cmd.Flags().StringArrayVar(&attachFiles, "attach", nil, "Attach file (repeatable)")
+
+	allowDash(cmd, "arg:0", "flag:content")
 
 	return cmd
 }
@@ -766,18 +807,24 @@ edit to rich text.`,
 				return missingArg(cmd, "<id|url>")
 			}
 
+			// A positional and --content are the same input, so supplying
+			// both is rejected rather than one silently winning — with "-"
+			// in play, the losing source would discard piped content unread.
 			messageContent := content
+			argIndex, what := -1, "--content"
 			if len(args) > 1 {
+				if cmd.Flags().Changed("content") {
+					return output.ErrUsage("cannot combine a [content] argument with --content")
+				}
 				messageContent = args[1]
+				argIndex, what = 1, "[content]"
 			}
 
-			if strings.TrimSpace(messageContent) == "" {
-				return missingArg(cmd, "<content>")
-			}
-
-			// Validate the content mode before any request or account setup so an
-			// unknown --content-type fails fast rather than silently sending raw
-			// bytes (the SDK no longer validates content type for us).
+			// Validate the content mode before reading stdin, not just before
+			// the request: an unknown --content-type dooms the invocation, and
+			// draining the pipe first makes the caller wait on a producer whose
+			// output is already discarded — or lets a blank pipe answer "stdin
+			// is empty" instead of naming the bad flag.
 			ct := *contentType
 			switch ct {
 			case "", "text/html", "text/plain":
@@ -785,17 +832,14 @@ edit to rich text.`,
 				return output.ErrUsage(fmt.Sprintf("unsupported --content-type %q (expected text/html or text/plain)", ct))
 			}
 
-			if err := ensureAccount(cmd, app); err != nil {
-				return err
-			}
-
-			// Resolve the line reference. A bare numeric ID falls through to
-			// --room/dock resolution; a URL must be a chat-line URL on a trusted
-			// host so a pasted card/todo/message URL — or a look-alike on an
-			// attacker-controlled host — can't be misinterpreted into an edit.
+			// Resolve the line reference before the read: the URL host and
+			// shape, an explicitly supplied --room, and a bare numeric line ID
+			// are all decidable from the arguments and the configured base URL,
+			// so a bad reference must not cost the caller a drained pipe.
 			lineID := args[0]
 			urlChatID := ""
 			urlProjectID := ""
+			var parsedURL *urlarg.Parsed
 			if urlarg.IsURL(args[0]) {
 				if !hostutil.IsTrustedBasecampHost(args[0], app.Config.BaseURL) {
 					return output.ErrUsage("refusing untrusted host in URL — expected a Basecamp URL")
@@ -808,15 +852,41 @@ edit to rich text.`,
 				if parsed == nil || parsed.Type != "lines" || parsed.IsCollection {
 					return output.ErrUsage("expected a chat-line ID or URL of the form /chats/{c}/lines/{l} or /chats/{c}@{l}")
 				}
-				// Guard against editing in the wrong account: the URL names an
-				// account, and if it disagrees with the configured one the safe
-				// move is to stop rather than silently target a different account.
-				if parsed.AccountID != "" && app.Config.AccountID != "" && parsed.AccountID != app.Config.AccountID {
-					return output.ErrUsage(fmt.Sprintf("URL account %s does not match the configured account %s", parsed.AccountID, app.Config.AccountID))
-				}
 				lineID = parsed.RecordingID
 				urlChatID = parsed.CampfireID
 				urlProjectID = parsed.ProjectID
+				parsedURL = parsed
+			}
+			if _, err := strconv.ParseInt(lineID, 10, 64); err != nil {
+				return output.ErrUsage("Invalid chat line ID")
+			}
+			if *chatID != "" {
+				if _, err := strconv.ParseInt(*chatID, 10, 64); err != nil {
+					return output.ErrUsage("Invalid chat room ID")
+				}
+			}
+
+			var contentErr error
+			messageContent, contentErr = resolveContentValue(cmd, messageContent, argIndex, what)
+			if contentErr != nil {
+				return contentErr
+			}
+
+			if strings.TrimSpace(messageContent) == "" {
+				return missingArg(cmd, "<content>")
+			}
+
+			if err := ensureAccount(cmd, app); err != nil {
+				return err
+			}
+
+			// The URL's host and shape were settled before the read; only the
+			// account comparison had to wait for a resolved account. Editing in
+			// the wrong account is worth stopping for rather than silently
+			// targeting a different one.
+			if parsedURL != nil && parsedURL.AccountID != "" && app.Config.AccountID != "" &&
+				parsedURL.AccountID != app.Config.AccountID {
+				return output.ErrUsage(fmt.Sprintf("URL account %s does not match the configured account %s", parsedURL.AccountID, app.Config.AccountID))
 			}
 
 			// Resolve the chat (campfire) ID, and a project only when needed. The
@@ -958,8 +1028,10 @@ edit to rich text.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&content, "content", "", "New message content")
+	cmd.Flags().StringVar(&content, "content", "", "New message content; use - to read from stdin")
 	cmd.Flags().StringVar(contentType, "content-type", "", "Input handling: text/html (supply HTML) or text/plain (verbatim); applied locally, edits always render as rich text")
+
+	allowDash(cmd, "arg:1", "flag:content")
 
 	return cmd
 }

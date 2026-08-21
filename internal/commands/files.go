@@ -887,12 +887,25 @@ as an upload in the target folder (vault).`,
   basecamp uploads create ./photo.png --folder 123 --description "Site photo"`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runUploadFile(cmd, *project, *vaultID, args[0], description, visibleToClients)
+			filePath, err := validateUploadPath(args[0])
+			if err != nil {
+				return err
+			}
+			if err := requireNumericID(*vaultID, "folder ID"); err != nil {
+				return err
+			}
+			description, err = resolveContentValue(cmd, description, -1, "--description")
+			if err != nil {
+				return err
+			}
+			return runUploadFile(cmd, *project, *vaultID, filePath, description, visibleToClients)
 		},
 	}
 
-	cmd.Flags().StringVar(&description, "description", "", "Upload description (Markdown)")
+	cmd.Flags().StringVar(&description, "description", "", "Upload description (Markdown); use - to read from stdin")
 	cmd.Flags().BoolVar(&visibleToClients, "visible-to-clients", false, "Make the upload visible to clients (root Docs & Files folder only; a nested folder inherits its folder's visibility). Omit for the server default.")
+
+	allowDash(cmd, "flag:description")
 
 	return cmd
 }
@@ -915,7 +928,18 @@ attachment and then created as an upload in the target folder.`,
   basecamp upload ./photo.png --folder 123 --description "Site photo"`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runUploadFile(cmd, project, vaultID, args[0], description, visibleToClients)
+			filePath, err := validateUploadPath(args[0])
+			if err != nil {
+				return err
+			}
+			if err := requireNumericID(vaultID, "folder ID"); err != nil {
+				return err
+			}
+			description, err = resolveContentValue(cmd, description, -1, "--description")
+			if err != nil {
+				return err
+			}
+			return runUploadFile(cmd, project, vaultID, filePath, description, visibleToClients)
 		},
 	}
 
@@ -923,8 +947,10 @@ attachment and then created as an upload in the target folder.`,
 	cmd.Flags().StringVar(&project, "in", "", "Project ID (alias for --project)")
 	cmd.Flags().StringVar(&vaultID, "vault", "", "Folder ID (default: root)")
 	cmd.Flags().StringVar(&vaultID, "folder", "", "Folder ID (alias for --vault)")
-	cmd.Flags().StringVar(&description, "description", "", "Upload description (Markdown)")
+	cmd.Flags().StringVar(&description, "description", "", "Upload description (Markdown); use - to read from stdin")
 	cmd.Flags().BoolVar(&visibleToClients, "visible-to-clients", false, "Make the upload visible to clients (root Docs & Files folder only; a nested folder inherits its folder's visibility). Omit for the server default.")
+
+	allowDash(cmd, "flag:description")
 
 	return cmd
 }
@@ -956,6 +982,19 @@ func resolveVaultClientVisibility(cmd *cobra.Command, app *appctx.App, vaultFlag
 	return &value, nil
 }
 
+// validateUploadPath normalizes a drag/paste path and checks the file is
+// readable. It needs no account and no network, so the upload commands run it
+// before resolving a "-" description: a missing file should not cost the caller
+// a drained pipe, and a blank pipe must not answer "stdin is empty" instead of
+// naming the unreadable file.
+func validateUploadPath(filePath string) (string, error) {
+	filePath = richtext.NormalizeDragPath(filePath)
+	if err := richtext.ValidateFile(filePath); err != nil {
+		return "", fmt.Errorf("%s: %w", filePath, err)
+	}
+	return filePath, nil
+}
+
 func runUploadFile(cmd *cobra.Command, project, vaultID, filePath, description string, visibleToClients bool) error {
 	app := appctx.FromContext(cmd.Context())
 
@@ -963,10 +1002,12 @@ func runUploadFile(cmd *cobra.Command, project, vaultID, filePath, description s
 		return err
 	}
 
-	// Normalize drag/paste paths and validate
-	filePath = richtext.NormalizeDragPath(filePath)
-	if err := richtext.ValidateFile(filePath); err != nil {
-		return fmt.Errorf("%s: %w", filePath, err)
+	// Normalize drag/paste paths and validate. Callers that read stdin run
+	// this first (see validateUploadPath); repeating it is idempotent and
+	// keeps this function correct on its own.
+	filePath, err := validateUploadPath(filePath)
+	if err != nil {
+		return err
 	}
 
 	// Resolve project, with interactive fallback
@@ -1214,6 +1255,13 @@ func newDocsCreateCmd(project, vaultID *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create <title> [content]",
 		Short: "Create a new document",
+		Long: `Create a new document in a project's Docs & Files area.
+
+Use - as the content argument to read the document body from stdin:
+  basecamp docs documents create "Title" - --in my-project < body.md`,
+		// Bounded so a stray third token is a usage error rather than being
+		// silently dropped after "-" has already drained stdin.
+		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Show help when invoked with no arguments
 			if len(args) == 0 {
@@ -1222,14 +1270,34 @@ func newDocsCreateCmd(project, vaultID *string) *cobra.Command {
 
 			title := args[0]
 
+			// Resolve "-" before any account or network work, so a bad stdin
+			// gets the stdin error rather than "--account is required".
+			if err := rejectSubscribeConflict(cmd.Flags().Changed("subscribe"), noSubscribe); err != nil {
+				return err
+			}
+			if err := requireNumericID(*vaultID, "folder ID"); err != nil {
+				return err
+			}
+
+			// Attachment paths are readable or not regardless of the body, so
+			// check them before the pipe is drained.
+			if err := validateAttachPaths(attachFiles); err != nil {
+				return err
+			}
+
+			content := ""
+			if len(args) > 1 {
+				var contentErr error
+				content, contentErr = resolveContentValue(cmd, args[1], 1, "[content]")
+				if contentErr != nil {
+					return contentErr
+				}
+			}
+
 			app := appctx.FromContext(cmd.Context())
 
 			if err := ensureAccount(cmd, app); err != nil {
 				return err
-			}
-			content := ""
-			if len(args) > 1 {
-				content = args[1]
 			}
 
 			// Resolve subscription flags before project (fail fast on bad input)
@@ -1338,6 +1406,8 @@ func newDocsCreateCmd(project, vaultID *string) *cobra.Command {
 	cmd.Flags().BoolVar(&noSubscribe, "no-subscribe", false, "Don't subscribe anyone else (silent, no notifications)")
 	cmd.Flags().StringArrayVar(&attachFiles, "attach", nil, "Attach file (repeatable)")
 	cmd.Flags().BoolVar(&visibleToClients, "visible-to-clients", false, "Make the document visible to clients (root Docs & Files folder only; a nested folder inherits its folder's visibility). Omit for the server default.")
+
+	allowDash(cmd, "arg:1")
 
 	return cmd
 }
@@ -1693,38 +1763,6 @@ You can pass either an upload ID or a Basecamp URL:
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app := appctx.FromContext(cmd.Context())
-			if err := ensureAccount(cmd, app); err != nil {
-				return err
-			}
-
-			// A pasted URL names its own account; refuse one that isn't the
-			// session's before anything is staged — extractID keeps only the
-			// numeric ID, which would silently retarget the configured
-			// account's same-numbered upload on a mutating request.
-			// A URL-shaped argument must live on a trusted Basecamp host:
-			// the URL router is host-agnostic, so a look-alike on an
-			// attacker-controlled host would otherwise pass the identity
-			// checks below and retarget the configured account's upload —
-			// the confused-deputy case hostutil exists to prevent.
-			if urlarg.IsURL(args[0]) && !hostutil.IsTrustedBasecampHost(args[0], app.Config.BaseURL) {
-				return output.ErrUsage("refusing untrusted host in URL — expected a Basecamp URL")
-			}
-
-			if parsed := urlarg.Parse(args[0]); parsed != nil {
-				if parsed.AccountID != "" && parsed.AccountID != app.Config.AccountID {
-					return output.ErrUsage(fmt.Sprintf("URL is for account %s, but this session uses account %s", parsed.AccountID, app.Config.AccountID))
-				}
-				if parsed.Type != "uploads" {
-					return output.ErrUsage(fmt.Sprintf("URL identifies a %s recording, not an upload", parsed.Type))
-				}
-				// A collection URL (/vaults/456/uploads, /buckets/456/uploads)
-				// also parses as type "uploads", but its extracted ID is the
-				// PARENT's — the identity predicate needs the recording half
-				// too, or extractID retargets a same-numbered upload.
-				if parsed.IsCollection || parsed.RecordingID == "" {
-					return output.ErrUsage("URL identifies an uploads listing, not a single upload")
-				}
-			}
 
 			uploadIDStr := extractID(args[0])
 			uploadID, err := strconv.ParseInt(uploadIDStr, 10, 64)
@@ -1735,6 +1773,56 @@ You can pass either an upload ID or a Basecamp URL:
 			filePath := richtext.NormalizeDragPath(args[1])
 			if err := richtext.ValidateFile(filePath); err != nil {
 				return fmt.Errorf("%s: %w", filePath, err)
+			}
+
+			// A URL-shaped argument must live on a trusted Basecamp host: the
+			// URL router is host-agnostic, so a look-alike on an
+			// attacker-controlled host would otherwise pass the identity checks
+			// and retarget the configured account's upload — the confused-deputy
+			// case hostutil exists to prevent. That, and whether the URL names a
+			// single upload at all, need only the configured base URL, so they
+			// run before the read; only the account comparison waits.
+			var parsedURL *urlarg.Parsed
+			if urlarg.IsURL(args[0]) {
+				if !hostutil.IsTrustedBasecampHost(args[0], app.Config.BaseURL) {
+					return output.ErrUsage("refusing untrusted host in URL — expected a Basecamp URL")
+				}
+				parsedURL = urlarg.Parse(args[0])
+			}
+			if parsedURL != nil {
+				if parsedURL.Type != "uploads" {
+					return output.ErrUsage(fmt.Sprintf("URL identifies a %s recording, not an upload", parsedURL.Type))
+				}
+				// A collection URL (/vaults/456/uploads, /buckets/456/uploads)
+				// also parses as type "uploads", but its extracted ID is the
+				// PARENT's — the identity predicate needs the recording half
+				// too, or extractID retargets a same-numbered upload.
+				if parsedURL.IsCollection || parsedURL.RecordingID == "" {
+					return output.ErrUsage("URL identifies an uploads listing, not a single upload")
+				}
+			}
+
+			// Syntactic checks first, then "-", then account and network: a
+			// malformed ID, missing file or foreign host is answered without
+			// waiting on the producer. The account-identity checks below need
+			// the session account, so they necessarily follow. Only an exact
+			// "-" reads stdin; --description "" stays the clear idiom.
+			description, err := resolveContentValue(cmd, description, -1, "--description")
+			if err != nil {
+				return err
+			}
+
+			if err := ensureAccount(cmd, app); err != nil {
+				return err
+			}
+
+			// A pasted URL names its own account; refuse one that isn't the
+			// session's before anything is staged — extractID keeps only the
+			// numeric ID, which would silently retarget the configured
+			// account's same-numbered upload on a mutating request. Host and
+			// shape were settled before the read; only this needed the account.
+			if parsedURL != nil && parsedURL.AccountID != "" && parsedURL.AccountID != app.Config.AccountID {
+				return output.ErrUsage(fmt.Sprintf("URL is for account %s, but this session uses account %s", parsedURL.AccountID, app.Config.AccountID))
 			}
 
 			// Resolve the description first: its local-image references can
@@ -1805,8 +1893,10 @@ You can pass either an upload ID or a Basecamp URL:
 		},
 	}
 
-	cmd.Flags().StringVar(&description, "description", "", "New description (Markdown); omit to carry the current one forward")
+	cmd.Flags().StringVar(&description, "description", "", "New description (Markdown); omit to carry the current one forward; use - to read from stdin")
 	cmd.Flags().StringVar(&baseName, "base-name", "", "Rename the file (without extension); omit to keep the uploaded file's name")
+
+	allowDash(cmd, "flag:description")
 
 	return cmd
 }
@@ -1866,6 +1956,47 @@ You can pass either an item ID or a Basecamp URL:
 		Annotations: map[string]string{"agent_notes": "Document updates preserve untouched title/content by fetching current state first because BC3 rebuilds documents from permitted params on PUT; explicit clears via --title \"\"/--content \"\" work because the SDK strips empty strings to absent fields, which the controller then nulls. Upload/vault updates do not clear by omission, so empty-valued flags are rejected CLI-side."},
 		Args:        cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Extract ID and project from URL if provided
+			itemIDStr, urlProjectID := extractWithProject(args[0])
+
+			itemID, err := strconv.ParseInt(itemIDStr, 10, 64)
+			if err != nil {
+				return output.ErrUsage("Invalid item ID")
+			}
+
+			// Syntactic checks first, then "-", then account and network: a
+			// malformed ID is answered without waiting on the producer, and a
+			// blank pipe cannot mask it. The --type vocabulary is checked here
+			// too — the switch below cannot move, since its no-op branches read
+			// the resolved content, but an unknown type dooms the invocation on
+			// its own and must not cost the caller a drained pipe.
+			itemType = strings.ToLower(strings.TrimSpace(itemType))
+			switch itemType {
+			case "", "document", "doc", "vault", "folder", "upload", "file":
+			default:
+				return output.ErrUsageHint(
+					fmt.Sprintf("Invalid type: %s", itemType),
+					"Use: vault, document, or upload",
+				)
+			}
+
+			// --content is meaningless for a folder, and whether it was given is
+			// knowable before its value is: the switch below needs the resolved
+			// content for its no-op branches, this does not.
+			if cmd.Flags().Changed("content") {
+				switch itemType {
+				case "vault", "folder":
+					return output.ErrUsage("--content can only be used with --type document or upload")
+				}
+			}
+
+			// Only an exact "-" reads stdin; --content "" stays the clear idiom.
+			var contentErr error
+			content, contentErr = resolveContentValue(cmd, content, -1, "--content")
+			if contentErr != nil {
+				return contentErr
+			}
+
 			titleChanged := cmd.Flags().Changed("title")
 			contentChanged := cmd.Flags().Changed("content")
 			titleTrimmed := strings.TrimSpace(title)
@@ -1877,7 +2008,6 @@ You can pass either an item ID or a Basecamp URL:
 			docContentSet := contentChanged && (content == "" || contentTrimmed != "")
 			nonDocTitleSet := titleChanged && titleTrimmed != ""
 			nonDocContentSet := contentChanged && contentTrimmed != ""
-			itemType = strings.ToLower(strings.TrimSpace(itemType))
 			switch itemType {
 			case "", "document", "doc":
 				if !docTitleSet && !docContentSet {
@@ -1905,14 +2035,6 @@ You can pass either an item ID or a Basecamp URL:
 
 			if err := ensureAccount(cmd, app); err != nil {
 				return err
-			}
-
-			// Extract ID and project from URL if provided
-			itemIDStr, urlProjectID := extractWithProject(args[0])
-
-			itemID, err := strconv.ParseInt(itemIDStr, 10, 64)
-			if err != nil {
-				return output.ErrUsage("Invalid item ID")
 			}
 
 			// Resolve project - use URL > flag > config, with interactive fallback
@@ -2061,8 +2183,10 @@ You can pass either an item ID or a Basecamp URL:
 	}
 
 	cmd.Flags().StringVarP(&title, "title", "t", "", "New title")
-	cmd.Flags().StringVarP(&content, "content", "c", "", "New content")
+	cmd.Flags().StringVarP(&content, "content", "c", "", "New content; use - to read from stdin")
 	cmd.Flags().StringVar(&itemType, "type", "", "Item type (vault, document, upload)")
+
+	allowDash(cmd, "flag:content")
 
 	return cmd
 }
@@ -2279,6 +2403,9 @@ Use --out - to stream the file to stdout (for piping to other commands).`,
 	}
 
 	cmd.Flags().StringVarP(&outDir, "out", "o", "", "Output directory (default: current directory)")
+
+	// --out - means stream to stdout — exempt from the stdin dash guard.
+	allowDash(cmd, "flag:out")
 
 	return cmd
 }

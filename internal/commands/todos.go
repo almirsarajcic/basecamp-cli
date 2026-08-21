@@ -1243,7 +1243,10 @@ project's to-do set instead, outside any list:
 
   basecamp todos create "Call the vendor back" --loose --in <project>
 
---loose needs no list, so it neither prompts for one nor accepts --list.`,
+--loose needs no list, so it neither prompts for one nor accepts --list.
+
+Use - as the content argument to read the todo title from stdin:
+  printf 'Call the vendor back' | basecamp todos create - --in <project>`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app := appctx.FromContext(cmd.Context())
 			if app == nil {
@@ -1254,9 +1257,40 @@ project's to-do set instead, outside any list:
 			if len(args) == 0 {
 				return missingArg(cmd, "<content>")
 			}
-			content := strings.Join(args, " ")
+
+			// --loose and a named list are mutually exclusive, and that is
+			// knowable from the flags alone. Decide it before the pipe is
+			// drained: a doomed invocation should not make the caller wait on a
+			// producer, and a blank pipe must not answer "stdin is empty"
+			// instead of naming the conflict. The destination resolution below
+			// still repeats the check, since a configured todolist is only one
+			// of its inputs.
+			if loose && (cmd.Flags().Changed("list") || todolist != "" || app.Flags.Todolist != "") {
+				return output.ErrUsageHint(
+					"--loose creates a todo outside any list, so it cannot be combined with --list",
+					"Drop --list to create on the to-do set, or drop --loose to create in that list")
+			}
+
+			// Attachment paths are readable or not regardless of the body, so
+			// check them before the pipe is drained.
+			if err := validateAttachPaths(attachFiles); err != nil {
+				return err
+			}
+			if err := requireNumericID(todoset, "todoset ID"); err != nil {
+				return err
+			}
+
+			content, err := resolveContentArg(cmd, args, 0)
+			if err != nil {
+				return err
+			}
 			if strings.TrimSpace(content) == "" {
 				return cmd.Help()
+			}
+
+			description, err := resolveContentValue(cmd, description, -1, "--description")
+			if err != nil {
+				return err
 			}
 
 			if err := ensureAccount(cmd, app); err != nil {
@@ -1437,12 +1471,14 @@ project's to-do set instead, outside any list:
 	cmd.Flags().StringVar(&assignee, "assignee", "", "Assignee ID")
 	cmd.Flags().StringVar(&assignee, "to", "", "Assignee ID (alias for --assignee)")
 	cmd.Flags().StringVarP(&due, "due", "d", "", "Due date (YYYY-MM-DD)")
-	cmd.Flags().StringVar(&description, "description", "", "Extended description (Markdown)")
+	cmd.Flags().StringVar(&description, "description", "", "Extended description (Markdown); use - to read from stdin")
 	cmd.Flags().StringArrayVar(&attachFiles, "attach", nil, "Attach file (repeatable)")
 	cmd.Flags().StringVar(&notifyOnCompletion, "notify-on-completion", "", "People to notify when done (names or IDs, comma-separated)")
 	// Not --todoset: that flag already means "which to-do set", and this one
 	// means "no list at all".
 	cmd.Flags().BoolVar(&loose, "loose", false, "Create on the to-do set, outside any list")
+
+	allowDash(cmd, "arg:0+", "flag:description")
 
 	// Register tab completion for flags
 	completer := completion.NewCompleter(nil)
@@ -1537,15 +1573,6 @@ Set or clear the people notified when the todo is completed:
 				return noChanges(cmd)
 			}
 
-			app := appctx.FromContext(cmd.Context())
-			if app == nil {
-				return fmt.Errorf("app not initialized")
-			}
-
-			if err := ensureAccount(cmd, app); err != nil {
-				return err
-			}
-
 			// Extract ID from URL if provided
 			todoIDStr := extractID(args[0])
 			todoID, err := strconv.ParseInt(todoIDStr, 10, 64)
@@ -1553,14 +1580,9 @@ Set or clear the people notified when the todo is completed:
 				return output.ErrUsage("Invalid todo ID")
 			}
 
-			// Pre-Edit validation and resolution — no todo HTTP happens here.
-			// Image uploads are deferred into the Edit closure so a missing
-			// todo can't orphan uploaded attachments.
-			var descHTML string
-			if !clearDescription && description != "" {
-				descHTML = richtext.MarkdownToHTML(description)
-			}
-
+			// Date formats are decidable from the flags alone, so they join the
+			// ID check ahead of the read. The parsed values are carried forward
+			// rather than re-derived below.
 			var parsedDue string
 			if !clearDue && strings.TrimSpace(due) != "" {
 				parsedDue = dateparse.Parse(due)
@@ -1574,6 +1596,32 @@ Set or clear the people notified when the todo is completed:
 				if _, err := time.Parse("2006-01-02", parsedStarts); err != nil {
 					return output.ErrUsage(fmt.Sprintf("Invalid start date: %q", startsOn))
 				}
+			}
+
+			// Syntactic checks first, then "-", then account and network: a
+			// malformed ID or date is answered without waiting on the producer,
+			// and a blank pipe cannot mask it. Only an exact "-" reads stdin;
+			// --description "" stays the clear idiom.
+			description, err := resolveContentValue(cmd, description, -1, "--description")
+			if err != nil {
+				return err
+			}
+
+			app := appctx.FromContext(cmd.Context())
+			if app == nil {
+				return fmt.Errorf("app not initialized")
+			}
+
+			if err := ensureAccount(cmd, app); err != nil {
+				return err
+			}
+
+			// Pre-Edit validation and resolution — no todo HTTP happens here.
+			// Image uploads are deferred into the Edit closure so a missing
+			// todo can't orphan uploaded attachments.
+			var descHTML string
+			if !clearDescription && description != "" {
+				descHTML = richtext.MarkdownToHTML(description)
 			}
 
 			var assigneeIDs []int64
@@ -1664,7 +1712,7 @@ Set or clear the people notified when the todo is completed:
 	}
 
 	cmd.Flags().StringVarP(&title, "title", "t", "", "Todo title (plain text)")
-	cmd.Flags().StringVar(&description, "description", "", "Extended description (Markdown)")
+	cmd.Flags().StringVar(&description, "description", "", "Extended description (Markdown); use - to read from stdin")
 	cmd.Flags().StringVar(&assignee, "assignee", "", "Assignees (names or IDs, comma-separated)")
 	cmd.Flags().StringVar(&assignee, "to", "", "Assignees (alias for --assignee)")
 	cmd.Flags().StringVarP(&due, "due", "d", "", "Due date (natural language or YYYY-MM-DD)")
@@ -1681,6 +1729,8 @@ Set or clear the people notified when the todo is completed:
 	_ = cmd.RegisterFlagCompletionFunc("assignee", completer.PeopleNameCompletion())
 	_ = cmd.RegisterFlagCompletionFunc("to", completer.PeopleNameCompletion())
 	_ = cmd.RegisterFlagCompletionFunc("notify-on-completion", completer.PeopleNameCompletion())
+
+	allowDash(cmd, "flag:description")
 
 	return cmd
 }
@@ -1873,13 +1923,23 @@ Examples:
   basecamp todos sweep --in <project> --assignee me --comment "Following up"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app := appctx.FromContext(cmd.Context())
-			if err := ensureAccount(cmd, app); err != nil {
+
+			// Require at least one filter. This gate decides the invocation on
+			// its own, so it runs before the pipe is drained: otherwise the
+			// caller waits on a producer whose output is already discarded, and
+			// a blank pipe answers "stdin is empty" instead of naming the
+			// missing filter.
+			if !overdueOnly && assignee == "" {
+				return output.ErrUsageHint("Sweep requires a filter", "Use --overdue or --assignee to select todos")
+			}
+
+			comment, err := resolveContentValue(cmd, comment, -1, "--comment")
+			if err != nil {
 				return err
 			}
 
-			// Require at least one filter
-			if !overdueOnly && assignee == "" {
-				return output.ErrUsageHint("Sweep requires a filter", "Use --overdue or --assignee to select todos")
+			if err := ensureAccount(cmd, app); err != nil {
+				return err
 			}
 
 			// Require at least one action
@@ -2020,10 +2080,12 @@ Examples:
 	cmd.Flags().StringVarP(&todoset, "todoset", "t", "", "Todoset ID (for projects with multiple todosets)")
 	cmd.Flags().StringVar(&assignee, "assignee", "", "Filter by assignee")
 	cmd.Flags().BoolVar(&overdueOnly, "overdue", false, "Filter overdue todos")
-	cmd.Flags().StringVarP(&comment, "comment", "c", "", "Comment to add to matching todos")
+	cmd.Flags().StringVarP(&comment, "comment", "c", "", "Comment to add to matching todos; use - to read from stdin")
 	cmd.Flags().BoolVar(&complete, "complete", false, "Mark matching todos as complete")
 	cmd.Flags().BoolVar(&complete, "done", false, "Mark matching todos as complete (alias)")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Preview without making changes")
+
+	allowDash(cmd, "flag:comment")
 
 	// Register tab completion for flags
 	completer := completion.NewCompleter(nil)
