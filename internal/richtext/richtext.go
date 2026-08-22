@@ -155,7 +155,15 @@ var mdConverter = goldmark.New(
 	),
 )
 
-// TrixBreak is a custom block node that renders as <br>\n for Trix paragraph spacing.
+// paragraphSeparator is the blank line Basecamp's editor itself stores between
+// two blocks. A bare top-level <br> is not a block in the editor's document
+// model, so it is discarded the first time someone edits the content and the
+// spacing disappears; an empty paragraph survives the round trip.
+const paragraphSeparator = "<p><br></p>"
+
+// TrixBreak is a custom block node that renders the blank line between blocks:
+// an empty paragraph at the top level, a <br> inside a block (see
+// renderTrixBreak).
 type TrixBreak struct{ ast.BaseBlock }
 
 // KindTrixBreak is the node kind for TrixBreak.
@@ -350,11 +358,18 @@ func (r *trixRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte, no
 	return ast.WalkContinue, nil
 }
 
-func (r *trixRenderer) renderTrixBreak(w util.BufWriter, _ []byte, _ ast.Node, entering bool) (ast.WalkStatus, error) {
+// renderTrixBreak emits an empty paragraph for a top-level break and a <br> for
+// one inside a block. Only the top level needs a block-level separator:
+// a <br> nested in a blockquote is inline content, which survives editing.
+func (r *trixRenderer) renderTrixBreak(w util.BufWriter, _ []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if !entering {
 		return ast.WalkContinue, nil
 	}
-	_, _ = w.WriteString("<br>\n")
+	if parent := node.Parent(); parent != nil && parent.Kind() == ast.KindDocument {
+		_, _ = w.WriteString(paragraphSeparator + "\n")
+	} else {
+		_, _ = w.WriteString("<br>\n")
+	}
 	return ast.WalkContinue, nil
 }
 
@@ -369,8 +384,8 @@ func (r *trixRenderer) renderEscapedAt(w util.BufWriter, _ []byte, _ ast.Node, e
 // MarkdownToHTML converts Markdown text to HTML suitable for Basecamp's rich text fields.
 // It uses goldmark with custom AST transformations for Trix editor compatibility.
 // If the input already appears to be HTML, it is passed through with existing
-// formatting preserved, except that a <br> separator is inserted between
-// directly adjacent paragraph blocks (see insertParagraphSeparators).
+// formatting preserved, except that a separator is inserted between directly
+// adjacent paragraph blocks (see insertParagraphSeparators).
 func MarkdownToHTML(md string) string {
 	if md == "" {
 		return ""
@@ -391,9 +406,9 @@ func MarkdownToHTML(md string) string {
 	return strings.TrimSpace(buf.String())
 }
 
-// insertParagraphSeparators inserts a <br> between directly adjacent, non-empty
-// paragraph blocks so that HTML supplied to the CLI renders with visible
-// paragraph spacing.
+// insertParagraphSeparators puts an empty separator paragraph between directly
+// adjacent, non-empty paragraph blocks so that HTML supplied to the CLI renders
+// with visible paragraph spacing.
 //
 // Basecamp's rich text relies on explicit separator nodes for paragraph
 // spacing, not CSS margins: contiguous <p>A</p><p>B</p> renders squished. The
@@ -408,10 +423,12 @@ func MarkdownToHTML(md string) string {
 // idempotent: a boundary that already carries a separator — a bare <br> between
 // the paragraphs, or an empty separator paragraph (<p><br></p> or <p></p>) on
 // either side — is left untouched, so running it on already-separated content
-// (including Basecamp editor output) is a no-op. Only directly adjacent <p>
-// blocks are separated; anything between them (whitespace excepted), such as a
-// heading, list, or attachment, already provides its own break and is left
-// alone.
+// (including Basecamp editor output) is a no-op. Separators the caller supplied
+// are left as they came: this matching is not nesting-aware, and a <br> the
+// caller put between two paragraphs inside a blockquote is legal inline content
+// that survives editing. Only directly adjacent <p> blocks are separated;
+// anything else between them, such as a heading, list, or attachment, already
+// provides its own break and is left alone.
 func insertParagraphSeparators(s string) string {
 	locs := reP.FindAllStringIndex(s, -1)
 	if len(locs) < 2 {
@@ -439,7 +456,7 @@ func insertParagraphSeparators(s string) string {
 		gap := s[end:nextStart]
 		if !empty[i] && !empty[i+1] && strings.TrimSpace(gap) == "" {
 			b.WriteString(gap)
-			b.WriteString("<br>")
+			b.WriteString(paragraphSeparator)
 			cursor = nextStart
 		}
 	}
@@ -451,7 +468,7 @@ func insertParagraphSeparators(s string) string {
 // i.e. it is empty or contains only <br> tags and whitespace, including
 // non-breaking-space entities (&nbsp;, &#160;, &#xa0;) that rich text editors
 // commonly use for blank separator lines. Such paragraphs act as separators, so
-// no additional <br> is inserted adjacent to them.
+// no additional one is inserted adjacent to them.
 func isEmptyParagraph(block string) bool {
 	m := reP.FindStringSubmatch(block)
 	if m == nil {
@@ -462,20 +479,60 @@ func isEmptyParagraph(block string) bool {
 	return strings.TrimSpace(inner) == ""
 }
 
-// PlainToHTML serializes literal plain text as Basecamp rich text: HTML-special
+// PlainToHTML serializes literal plain text as Basecamp rich text. HTML-special
 // characters are escaped so they render as typed (not interpreted as markup),
-// and line breaks are preserved as <br> so multi-line input keeps its shape.
-// Windows CRLF and bare CR are normalized to LF first so a single <br> is
-// emitted per line break. Use this when the caller wants the text delivered
-// verbatim to an endpoint that always stores rich text.
+// and the line structure is kept in the one shape Basecamp's editor preserves
+// across an edit: each run of non-blank lines becomes a <p> with single line
+// breaks as <br> between its lines, and each blank line between runs becomes an
+// empty paragraph (paragraphSeparator).
+//
+// The editor drops a root-level <br> on import and keeps a <br> only when it
+// sits between two text runs inside a block, so neither bare <br> between
+// lines nor <br><br> for a blank line survives the first edit in Basecamp.
+// Leading and trailing blank lines are dropped — they have no paragraphs to
+// separate — matching the Markdown path; a whitespace-only line counts as
+// blank. Windows CRLF and bare CR are normalized to LF first. Use this when the
+// caller wants the text delivered verbatim to an endpoint that always stores
+// rich text.
 func PlainToHTML(s string) string {
-	if s == "" {
-		return ""
-	}
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
-	s = escapeHTML(s)
-	return strings.ReplaceAll(s, "\n", "<br>")
+	lines := trimBlankLines(strings.Split(escapeHTML(s), "\n"))
+
+	var b strings.Builder
+	var run []string
+	flush := func() {
+		if len(run) > 0 {
+			b.WriteString("<p>" + strings.Join(run, "<br>") + "</p>")
+			run = run[:0]
+		}
+	}
+	for _, line := range lines {
+		if isBlankLine(line) {
+			flush()
+			b.WriteString(paragraphSeparator)
+		} else {
+			run = append(run, line)
+		}
+	}
+	flush()
+	return b.String()
+}
+
+// trimBlankLines drops leading and trailing blank lines.
+func trimBlankLines(lines []string) []string {
+	start, end := 0, len(lines)
+	for start < end && isBlankLine(lines[start]) {
+		start++
+	}
+	for end > start && isBlankLine(lines[end-1]) {
+		end--
+	}
+	return lines[start:end]
+}
+
+func isBlankLine(line string) bool {
+	return strings.TrimSpace(line) == ""
 }
 
 // escapeHTML escapes special HTML characters.
