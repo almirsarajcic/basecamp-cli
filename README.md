@@ -134,6 +134,31 @@ Every command supports `--json` for structured output:
 
 Breadcrumbs suggest next commands, making it easy for humans and agents to navigate.
 
+Errors use the same envelope with `ok: false`, a stable `code`, and `retryable`,
+which says whether a retry can change the outcome:
+
+```json
+{
+  "ok": false,
+  "error": "Gateway error (503)",
+  "code": "api_error",
+  "retryable": true,
+  "hint": "..."
+}
+```
+
+Key order within the envelope is not part of the contract — the interactive
+(TTY) path re-encodes through a map and alphabetizes keys — so match on key
+names, never on position.
+
+`retryable` is present on every error envelope — `true` when the CLI classified
+the failure transient (network, timeout, rate limit, circuit open, and most
+5xx/gateway responses — not all: 507 and some 500s are verdicts), `false` for a
+verdict (usage, not found, auth, forbidden, validation, account limit) and for
+any error nothing classified — and never on a success envelope. Key on it rather
+than on the code or message when deciding whether to retry; `false` means no
+known reason a retry would help, not a guarantee the failure is permanent.
+
 ## Authentication
 
 OAuth 2.1 with automatic token refresh. First login opens your browser.
