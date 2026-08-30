@@ -125,7 +125,12 @@ func newToolsShowCmd(project *string) *cobra.Command {
 			if tool.Position != nil {
 				posStr = fmt.Sprintf("%d", *tool.Position)
 			}
-			summary := fmt.Sprintf("%s (%s) at position %s", tool.Title, tool.Name, posStr)
+			// Name is nil for the Get projection in SDK v0.15.0; only render
+			// the parenthetical when there is something to put in it.
+			summary := fmt.Sprintf("%s at position %s", tool.Title, posStr)
+			if tool.Name != nil {
+				summary = fmt.Sprintf("%s (%s) at position %s", tool.Title, *tool.Name, posStr)
+			}
 
 			crumbs := []output.Breadcrumb{
 				{
