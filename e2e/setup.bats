@@ -1,10 +1,10 @@
 #!/usr/bin/env bats
-# setup.bats - `basecamp setup` refuses to prompt when nothing can answer it.
+# setup.bats - `basecamp setup` refuses when first-time setup cannot run safely.
 #
-# The wizard is prompts end to end, and huh runs them as a bubbletea program.
-# Redirecting stdin does not make that program fail: bubbletea sees a
-# non-terminal stdin and opens /dev/tty instead, so the prompt waits on the real
-# terminal — `basecamp setup --json < /dev/null` hung forever.
+# Recommended setup opens browser OAuth, while `--customize` also uses huh
+# prompts. Redirecting stdin does not make a bubbletea prompt fail: it can open
+# /dev/tty instead and wait on the real terminal. The setup gate keeps both
+# modes out of contexts that cannot complete them.
 #
 # Every case runs under a timeout, and the timeout is the assertion: exit 124 is
 # the bug reproducing. A unit test with a fake reader cannot catch this, because
@@ -66,6 +66,42 @@ assert_refused() {
 
   run_guarded "basecamp setup --json < /dev/null"
   assert_refused
+}
+
+@test "setup --customize refuses under --json with redirected stdin" {
+  create_credentials
+  create_global_config '{"account_id": 99999}'
+
+  run_guarded "basecamp setup --customize --json < /dev/null"
+  assert_refused
+}
+
+@test "setup --minimal refuses under --json with redirected stdin" {
+  create_credentials
+  create_global_config '{"account_id": 99999}'
+
+  run_guarded "basecamp setup --minimal --json < /dev/null"
+  assert_refused
+}
+
+@test "setup --project gives non-interactive config guidance" {
+  create_credentials
+  create_global_config '{"account_id": 99999}'
+
+  run_guarded "basecamp setup --project 123 --json < /dev/null"
+  assert_not_timed_out
+  assert_failure
+  assert_json_value '.code' 'usage'
+  assert_json_value '.hint | contains("basecamp config set project_id <id>")' 'true'
+  assert_json_value '.hint | contains("--customize")' 'false'
+}
+
+@test "setup rejects an unknown subcommand before onboarding" {
+  run_guarded "basecamp setup codxe --json < /dev/null"
+  assert_not_timed_out
+  assert_failure
+  assert_json_value '.error | contains("unknown command")' 'true'
+  assert_json_value '.error | contains("interactive terminal")' 'false'
 }
 
 @test "setup without --json and stdin closed refuses instead of hanging" {

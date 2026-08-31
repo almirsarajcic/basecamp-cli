@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/basecamp/basecamp-sdk/go/pkg/basecamp"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -112,13 +115,30 @@ func TestShowSuccessIncomplete(t *testing.T) {
 	issues := issuesFromChecks(checks)
 
 	var buf bytes.Buffer
-	showSuccess(&buf, styles, WizardResult{Status: "incomplete", AccountID: "123"}, checks, issues, false)
+	showSuccess(&buf, styles, WizardResult{Status: "incomplete", AccountID: "123"}, checks, issues, false, omarchyPluginOutcome{})
 	out := buf.String()
 
 	assert.NotContains(t, out, "Setup complete!")
 	assert.Contains(t, out, "Setup finished")
 	assert.Contains(t, out, "Run: basecamp setup claude") // agent-specific hint
 	assert.Contains(t, out, "basecamp doctor")
+}
+
+func TestShowSuccessOmarchyFailure(t *testing.T) {
+	styles := tui.NewStylesWithTheme(tui.NoColorTheme())
+	var buf bytes.Buffer
+	showSuccess(&buf, styles, WizardResult{Status: "incomplete", AccountID: "123"}, nil, nil, false, omarchyPluginOutcome{
+		Detected: true,
+		Status:   "failed",
+		Detail:   "could not update the Basecamp plugin",
+		Manual:   "omarchy plugin update 37signals.basecamp",
+	})
+
+	out := buf.String()
+	assert.Contains(t, out, "1 step needs attention")
+	assert.Contains(t, out, "Basecamp plugin setup needs attention")
+	assert.Contains(t, out, "omarchy plugin update 37signals.basecamp")
+	assert.NotContains(t, out, "basecamp doctor")
 }
 
 // TestClaudeStaleIssues verifies surviving stale plugin entries become an issue
@@ -151,7 +171,7 @@ func TestShowSuccessSkipped(t *testing.T) {
 	checks := snapshotAgentChecks(fakeAgents())
 
 	var buf bytes.Buffer
-	showSuccess(&buf, styles, WizardResult{Status: "complete", AccountID: "123"}, checks, nil, true)
+	showSuccess(&buf, styles, WizardResult{Status: "complete", AccountID: "123"}, checks, nil, true, omarchyPluginOutcome{})
 	out := buf.String()
 
 	assert.Contains(t, out, "Setup complete!")
@@ -167,7 +187,7 @@ func TestShowSuccessComplete(t *testing.T) {
 	checks := []agentCheck{{Agent: "Claude Code", Name: "Claude Code Plugin", Status: "pass"}}
 
 	var buf bytes.Buffer
-	showSuccess(&buf, styles, WizardResult{Status: "complete", AccountID: "123"}, checks, nil, false)
+	showSuccess(&buf, styles, WizardResult{Status: "complete", AccountID: "123"}, checks, nil, false, omarchyPluginOutcome{})
 	out := buf.String()
 
 	assert.Contains(t, out, "Setup complete!")
@@ -189,6 +209,381 @@ func TestNewSetupCmd(t *testing.T) {
 	cmd := NewSetupCmd()
 	assert.Equal(t, "setup", cmd.Use)
 	assert.Contains(t, cmd.Short, "setup")
+
+	customize := cmd.Flags().Lookup("customize")
+	require.NotNil(t, customize)
+	assert.Equal(t, "false", customize.DefValue)
+
+	minimal := cmd.Flags().Lookup("minimal")
+	require.NotNil(t, minimal)
+	assert.Equal(t, "false", minimal.DefValue)
+}
+
+func TestSetupRejectsUnknownSubcommandBeforeRunning(t *testing.T) {
+	app, _ := setupQuickstartTestApp(t, "", "")
+	var stdout, stderr bytes.Buffer
+
+	cmd := NewSetupCmd()
+	cmd.SetArgs([]string{"codxe"})
+	cmd.SetContext(appctx.WithApp(context.Background(), app))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown command "codxe"`)
+	assert.False(t, app.SuppressPostRunNotices)
+	assert.NotContains(t, stdout.String(), "Basecamp at your command")
+}
+
+func TestFastSetupNonInteractiveProjectUsesConfigHint(t *testing.T) {
+	app, _ := setupQuickstartTestApp(t, "", "")
+	app.Flags.Project = "123"
+	cmd := &cobra.Command{}
+	cmd.SetContext(appctx.WithApp(context.Background(), app))
+
+	err := runFastSetup(cmd, app, false)
+	require.Error(t, err)
+	assert.True(t, app.SuppressPostRunNotices)
+	assert.Equal(t, output.CodeUsage, output.AsError(err).Code)
+	assert.Contains(t, output.AsError(err).Hint, "basecamp config set project_id <id>")
+	assert.NotContains(t, output.AsError(err).Hint, "--customize")
+}
+
+func TestChooseAutomaticAccount(t *testing.T) {
+	accounts := []basecamp.AuthorizedAccount{
+		{ID: 123, Name: "First Account"},
+		{ID: 456, Name: "Second Account"},
+	}
+
+	id, name, err := chooseAutomaticAccount("", "", "", accounts)
+	require.NoError(t, err)
+	assert.Equal(t, "123", id)
+	assert.Equal(t, "First Account", name)
+
+	id, name, err = chooseAutomaticAccount("", "", "0456", accounts)
+	require.NoError(t, err)
+	assert.Equal(t, "456", id)
+	assert.Equal(t, "Second Account", name)
+
+	id, name, err = chooseAutomaticAccount("", "789", "456", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "789", id)
+	assert.Empty(t, name)
+
+	id, name, err = chooseAutomaticAccount("0789", "789", "456", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "789", id)
+	assert.Empty(t, name)
+
+	id, name, err = chooseAutomaticAccount("0123", "", "456", accounts)
+	require.NoError(t, err)
+	assert.Equal(t, "123", id)
+	assert.Equal(t, "First Account", name)
+
+	_, _, err = chooseAutomaticAccount("999", "", "456", accounts)
+	require.Error(t, err)
+	assert.Equal(t, output.CodeNotFound, output.AsError(err).Code)
+
+	_, _, err = chooseAutomaticAccount("999", "789", "456", nil)
+	require.Error(t, err)
+	assert.Equal(t, output.CodeUsage, output.AsError(err).Code)
+	assert.Contains(t, output.AsError(err).Hint, "--account 789")
+
+	_, _, err = chooseAutomaticAccount("abc", "", "", accounts)
+	require.Error(t, err)
+	assert.Equal(t, output.CodeUsage, output.AsError(err).Code)
+
+	_, _, err = chooseAutomaticAccount("", "", "999", accounts)
+	require.Error(t, err)
+	assert.Equal(t, output.CodeNotFound, output.AsError(err).Code)
+
+	_, _, err = chooseAutomaticAccount("", "", "", nil)
+	require.Error(t, err)
+	assert.Equal(t, output.CodeNotFound, output.AsError(err).Code)
+}
+
+func TestConfiguredAccountConflictWithOAuthBinding(t *testing.T) {
+	for _, source := range []string{"local", "repo", "env", "flag", "profile"} {
+		t.Run(source, func(t *testing.T) {
+			assert.True(t, configuredAccountOverridesGlobal(source))
+			err := configuredAccountMismatchError(source, "456", "123")
+			require.Error(t, err)
+			assert.Equal(t, output.CodeUsage, output.AsError(err).Code)
+			assert.Contains(t, err.Error(), "456")
+			assert.Contains(t, err.Error(), "123")
+		})
+	}
+
+	for _, source := range []string{"", "default", "system", "global", "prompt"} {
+		t.Run("safe-"+source, func(t *testing.T) {
+			assert.False(t, configuredAccountOverridesGlobal(source))
+		})
+	}
+	assert.True(t, accountIDsEqual("00123", "123"))
+	assert.False(t, accountIDsEqual("456", "123"))
+}
+
+func TestPersistRecommendedDefaultsClearsOnlyTheGlobalProject(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	globalPath := filepath.Join(configHome, "basecamp", "config.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(globalPath), 0o700))
+	require.NoError(t, os.WriteFile(globalPath, []byte(`{"account_id":"111","project_id":"222","hints":true}`), 0o600))
+
+	workingDir := t.TempDir()
+	previousDir, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(workingDir))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(previousDir)) })
+	localPath := filepath.Join(workingDir, ".basecamp", "config.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPath), 0o700))
+	require.NoError(t, os.WriteFile(localPath, []byte(`{"project_id":"333"}`), 0o600))
+
+	app, _ := setupQuickstartTestApp(t, "111", "333")
+	app.Config.Sources = map[string]string{"account_id": "global", "project_id": "local"}
+	require.NoError(t, persistRecommendedDefaults(app, "456"))
+
+	var global map[string]any
+	data, err := os.ReadFile(globalPath)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &global))
+	assert.Equal(t, "456", global["account_id"])
+	assert.Equal(t, true, global["hints"])
+	assert.NotContains(t, global, "project_id")
+
+	localData, err := os.ReadFile(localPath)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"project_id":"333"}`, string(localData))
+	assert.Equal(t, "456", app.Config.AccountID)
+	assert.Empty(t, app.Config.ProjectID)
+	assert.NotContains(t, app.Config.Sources, "project_id")
+}
+
+func TestShowWelcome(t *testing.T) {
+	styles := tui.NewStylesWithTheme(tui.ResolveTheme(false))
+	var buf bytes.Buffer
+	wait := showWelcome(&buf, styles)
+	wait()
+
+	out := buf.String()
+	assert.Contains(t, out, "Basecamp at your command (line).")
+	assert.Equal(t, 1, strings.Count(out, "Basecamp"), "the logo should not repeat the product name")
+	assert.NotContains(t, out, "Welcome to Basecamp")
+	assert.Contains(t, out, "Let's get you set up. It’ll only take a moment.")
+	assert.NotContains(t, out, "command-line interface for Basecamp")
+}
+
+func TestShowFastAuthenticationStart(t *testing.T) {
+	styles := tui.NewStylesWithTheme(tui.NoColorTheme())
+	var buf bytes.Buffer
+	prefix := showAuthenticationStart(&buf, styles, false)
+	log := authenticationLogger(&buf, prefix)
+	log("Authenticating via launchpad (https://launchpad.37signals.com/authorization/new)")
+	log("\nOpening browser for authentication...")
+
+	assert.Empty(t, prefix)
+	assert.Equal(t, "Opening browser for Basecamp login...\n", buf.String())
+	assert.NotContains(t, buf.String(), "Step 1")
+	assert.NotContains(t, buf.String(), "launchpad")
+	assert.NotContains(t, buf.String(), "Opening browser for authentication")
+
+	var deviceFlow bytes.Buffer
+	deviceLog := authenticationLogger(&deviceFlow, "")
+	deviceLog("Authenticating via https://3.basecampapi.com (device flow)")
+	deviceLog("\nOpening browser for authentication...")
+	assert.Contains(t, deviceFlow.String(), "Authenticating via https://3.basecampapi.com (device flow)")
+	assert.Contains(t, deviceFlow.String(), "Opening browser for authentication")
+}
+
+func TestShowFastSuccess(t *testing.T) {
+	styles := tui.NewStylesWithTheme(tui.ResolveTheme(false))
+	result := WizardResult{AuthenticatedAs: "Jane Smith"}
+
+	var buf bytes.Buffer
+	showFastAuthenticated(&buf, styles, result.AuthenticatedAs, "123", "Acme")
+	showFastAgentStatus(&buf, styles, agentSetupOutcome{Detected: 2})
+	showFastCompletion(&buf, styles, agentSetupOutcome{}, omarchyPluginOutcome{}, false)
+	out := buf.String()
+
+	assert.NotContains(t, out, "Setup complete!")
+	assert.Contains(t, out, "Authenticated as Jane Smith")
+	assert.Contains(t, out, "Using account Acme")
+	assert.Contains(t, out, "AI coding agents set up")
+	assert.NotContains(t, out, "Account: Acme")
+	assert.NotContains(t, out, "basecamp setup --customize")
+	assert.NotContains(t, out, "Try these commands")
+	for _, want := range []string{
+		"Try it out!",
+		"basecamp projects list",
+		"basecamp assignments",
+		"basecamp timeline",
+		`basecamp search "quarterly planning"`,
+	} {
+		assert.Contains(t, out, want)
+	}
+}
+
+func TestShowFastSuccessMinimal(t *testing.T) {
+	styles := tui.NewStylesWithTheme(tui.DefaultTheme(false))
+	var buf bytes.Buffer
+	showFastAuthenticated(&buf, styles, "Jane Smith", "123", "Acme")
+	showFastAgentStatus(&buf, styles, agentSetupOutcome{Detected: 2})
+	showFastCompletion(&buf, styles, agentSetupOutcome{}, omarchyPluginOutcome{}, true)
+
+	out := buf.String()
+	assert.Contains(t, out, "Authenticated as Jane Smith")
+	assert.Contains(t, out, "Using account Acme")
+	assert.Contains(t, out, "AI coding agents set up")
+	assert.Contains(t, out, fastSetupTitleStyle(styles).Render("SETUP COMPLETE"))
+	assert.NotContains(t, out, "Try it out!")
+	assert.NotContains(t, out, "basecamp projects list")
+	assert.True(t, strings.HasSuffix(out, "\n\n"), "completion message should have a blank line below it")
+}
+
+func TestShowFastCompletionReportsIntegrationOutcomes(t *testing.T) {
+	styles := tui.NewStylesWithTheme(tui.NoColorTheme())
+
+	var installed bytes.Buffer
+	showFastCompletion(&installed, styles, agentSetupOutcome{}, omarchyPluginOutcome{
+		Detected: true,
+		Status:   "installed",
+	}, false)
+	assert.Contains(t, installed.String(), "Basecamp plugin installed for Omarchy")
+
+	var ready bytes.Buffer
+	showFastCompletion(&ready, styles, agentSetupOutcome{}, omarchyPluginOutcome{
+		Detected: true,
+		Status:   "ready",
+	}, false)
+	assert.Contains(t, ready.String(), "Basecamp plugin ready for Omarchy")
+	assert.NotContains(t, ready.String(), "updated")
+
+	var omarchyFailed bytes.Buffer
+	showFastCompletion(&omarchyFailed, styles, agentSetupOutcome{}, omarchyPluginOutcome{
+		Detected: true,
+		Status:   "failed",
+		Manual:   "omarchy plugin update 37signals.basecamp",
+	}, true)
+	assert.Contains(t, omarchyFailed.String(), "Basecamp plugin setup needs attention")
+	assert.Contains(t, omarchyFailed.String(), "omarchy plugin update 37signals.basecamp")
+	assert.Contains(t, omarchyFailed.String(), "SETUP NEEDS ATTENTION")
+	assert.NotContains(t, omarchyFailed.String(), "SETUP COMPLETE")
+
+	var agentsFailed bytes.Buffer
+	showFastCompletion(&agentsFailed, styles, agentSetupOutcome{
+		Issues: []agentIssue{{Check: "Claude Code Plugin"}},
+	}, omarchyPluginOutcome{}, true)
+	assert.Contains(t, agentsFailed.String(), "SETUP NEEDS ATTENTION")
+	assert.NotContains(t, agentsFailed.String(), "SETUP COMPLETE")
+}
+
+func TestShowFastSetupExamplesUseTerminalColor(t *testing.T) {
+	styles := tui.NewStylesWithTheme(tui.ResolveTheme(false))
+	var buf bytes.Buffer
+	showFastSetupExamples(&buf, styles)
+
+	lines := strings.Split(buf.String(), "\n")
+	for _, command := range []string{
+		"basecamp projects list",
+		"basecamp assignments",
+		"basecamp timeline",
+		`basecamp search "quarterly planning"`,
+	} {
+		var found bool
+		for _, line := range lines {
+			if strings.HasPrefix(line, command) {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "command should start at column zero in the terminal's default color: %s", command)
+	}
+}
+
+func TestShowFastSuccessWithoutAgents(t *testing.T) {
+	styles := tui.NewStylesWithTheme(tui.ResolveTheme(false))
+	var buf bytes.Buffer
+	showFastAgentStatus(&buf, styles, agentSetupOutcome{})
+
+	assert.Contains(t, buf.String(), "AI coding agents: none detected")
+}
+
+func TestShowFastSuccessHidesAgentDetails(t *testing.T) {
+	styles := tui.NewStylesWithTheme(tui.ResolveTheme(false))
+	var buf bytes.Buffer
+	showFastAgentStatus(&buf, styles, agentSetupOutcome{
+		Detected: 1,
+		Issues: []agentIssue{{
+			Check: "Claude Code Plugin",
+			Hint:  "Plugin version mismatch",
+		}},
+	})
+
+	out := buf.String()
+	assert.Contains(t, out, "AI coding agents need attention — run: basecamp doctor")
+	assert.NotContains(t, out, "Claude Code Plugin")
+	assert.NotContains(t, out, "version mismatch")
+}
+
+func TestInstallDetectedAgentsRunsEveryHandler(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	originalHandlers := agentSetupHandlers
+	var ran []string
+	agentSetupHandlers = map[string]agentSetupHandler{
+		"alpha": {Run: func(*cobra.Command, *tui.Styles) error {
+			ran = append(ran, "alpha")
+			return nil
+		}},
+		"beta": {Run: func(*cobra.Command, *tui.Styles) error {
+			ran = append(ran, "beta")
+			return nil
+		}},
+	}
+	t.Cleanup(func() { agentSetupHandlers = originalHandlers })
+
+	agents := []harness.AgentInfo{
+		{ID: "alpha", Name: "Alpha", Checks: func() []*harness.StatusCheck { return nil }},
+		{ID: "beta", Name: "Beta", Checks: func() []*harness.StatusCheck { return nil }},
+	}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	outcome, err := installDetectedAgents(cmd, tui.NewStylesWithTheme(tui.ResolveTheme(false)), agents)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alpha", "beta"}, ran)
+	assert.Equal(t, 2, outcome.Detected)
+}
+
+func TestInstallDetectedAgentsQuietlySuppressesChatter(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	originalHandlers := agentSetupHandlers
+	agentSetupHandlers = map[string]agentSetupHandler{
+		"alpha": {Run: func(cmd *cobra.Command, _ *tui.Styles) error {
+			fmt.Fprintln(cmd.OutOrStdout(), "plugin mismatch")
+			fmt.Fprintln(cmd.ErrOrStderr(), "agent skill updated")
+			return nil
+		}},
+	}
+	t.Cleanup(func() { agentSetupHandlers = originalHandlers })
+
+	agents := []harness.AgentInfo{
+		{ID: "alpha", Name: "Alpha", Checks: func() []*harness.StatusCheck { return nil }},
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+
+	_, err := installDetectedAgentsQuietly(cmd, tui.NewStylesWithTheme(tui.ResolveTheme(false)), agents)
+	require.NoError(t, err)
+	assert.Empty(t, stdout.String())
+	assert.Empty(t, stderr.String())
 }
 
 // TestNewSetupCmdHasClaudeSubcommand verifies setup has the claude subcommand.
@@ -675,8 +1070,8 @@ func nonInteractiveStdin(t *testing.T, kind string) {
 }
 
 // runSetupWithin executes the setup command and fails if it has not returned
-// within the timeout. The timeout is the real assertion: an ungated wizard
-// reaches a huh prompt, which blocks on /dev/tty rather than failing.
+// within the timeout. The timeout guards against setup reaching a browser or
+// prompt in a context that cannot complete it.
 func runSetupWithin(t *testing.T, cmd *cobra.Command, timeout time.Duration) error {
 	t.Helper()
 
@@ -733,8 +1128,8 @@ func TestSetupRefusesNonInteractiveStdio(t *testing.T) {
 }
 
 // TestSetupRefusesUnderNonInteractiveEnv verifies BASECAMP_NONINTERACTIVE is
-// honored even where stdio would pass: the wizard is prompts end to end, so
-// the env var that means "never prompt me" has to reach it.
+// honored even where stdio would pass. The env var that disables human setup
+// applies to both recommended and customized setup.
 func TestSetupRefusesUnderNonInteractiveEnv(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("BASECAMP_NONINTERACTIVE", "1")
@@ -753,12 +1148,11 @@ func TestSetupRefusesUnderNonInteractiveEnv(t *testing.T) {
 }
 
 // TestSetupRefusesMachineOutputOnATerminal covers the other half of the gate.
-// Terminal stdio is not enough: a caller that asked for machine output has
-// declared it is not there to answer questions, and the wizard is nothing but
-// questions. Config-driven json/quiet counts too — app.IsInteractive() does not
-// look at it, which is why the gate also asks IsMachineOutput(). An explicit
-// --styled/--md overrides a configured machine format there, so that pairing
-// prompts like any human invocation.
+// Terminal stdio is not enough: a caller that requested machine output is not
+// running human first-time setup. Config-driven json/quiet counts too —
+// app.IsInteractive() does not look at it, which is why the gate also asks
+// IsMachineOutput(). An explicit --styled/--md override restores human output,
+// so that pairing can run setup like any human invocation.
 func TestSetupRefusesMachineOutputOnATerminal(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("no /dev/ptmx on Windows")
@@ -832,14 +1226,11 @@ func TestSetupSubcommandsSurviveTheGate(t *testing.T) {
 }
 
 // TestBareBasecampNeverReportsASetupError covers the difference between asking
-// for the wizard and being handed one. `basecamp setup` refuses out loud when it
-// cannot prompt — the user named that command. Bare `basecamp` never asked for a
-// wizard, so an error about `basecamp setup` is an answer to a question nobody
-// posed, and it replaces output the user was entitled to.
+// for setup and receiving first-run behavior implicitly. Explicit setup refuses
+// when it cannot run safely. Bare `basecamp` falls through to its normal output.
 //
-// Both rows reach runWizard through RunQuickStartDefault's first-run path and
-// would have hit the gate, because isFirstRun's old check saw only stdin and
-// stdout:
+// Both rows reach RunQuickStartDefault's first-run decision and would have hit
+// the setup gate when isFirstRun only checked stdin and stdout:
 //
 //   - stderr redirected: stdin/stdout are terminals, so first-run fires, but
 //     huh draws to stderr and could not have shown anything.
@@ -873,7 +1264,7 @@ func TestBareBasecampNeverReportsASetupError(t *testing.T) {
 			tc.apply(t, app)
 
 			// Without this the test proves nothing: isFirstRun bails on
-			// IsInteractive before it ever reaches the wizard, and every
+			// IsInteractive before it ever reaches setup, and every
 			// assertion below passes for the wrong reason. An earlier version
 			// of this test did exactly that — it set stdout and stderr but left
 			// stdin on go test's /dev/null, so it passed against the bug.

@@ -9,8 +9,10 @@ try {
 # Environment options:
 #   BASECAMP_VERSION      Specific version to install (default: latest)
 #   BASECAMP_BIN_DIR      Where to install the binary
-#   BASECAMP_SKIP_SETUP   Set to 1 to skip the interactive wizard (still runs
+#   BASECAMP_SKIP_SETUP   Set to 1 to skip first-time setup (still runs
 #                         `basecamp setup agents`)
+#   BASECAMP_NONINTERACTIVE
+#                         Set to 1 or true to use non-interactive setup
 #   BASECAMP_SETUP_AGENT  Which coding agent(s) `setup agents` connects:
 #                         claude | codex | all | none. Unset = auto-detect.
 #                         Piped install sets it for the interpreter, not the fetch:
@@ -26,6 +28,14 @@ function Step([string]$Message) {
 
 function Info([string]$Message) {
   Write-Host "  + $Message" -ForegroundColor Green
+}
+
+function Warn([string]$Message) {
+  Write-Warning $Message
+}
+
+function Test-TruthyEnvironmentValue([string]$Value) {
+  return $Value -match '^(?i:1|true)$'
 }
 
 function Fail([string]$Message) {
@@ -287,10 +297,27 @@ function Test-InteractiveSession {
   }
 
   try {
-    return -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected
+    return -not [Console]::IsInputRedirected -and
+      -not [Console]::IsOutputRedirected -and
+      -not [Console]::IsErrorRedirected
   } catch {
     return $false
   }
+}
+
+# Invoke-FirstTimeSetup runs optional onboarding without changing the successful
+# installation result. The native process inherits the console streams so setup
+# can render and pass its terminal-safety gate.
+function Invoke-FirstTimeSetup([string]$Binary) {
+  try {
+    & $Binary setup
+    if ($LASTEXITCODE -eq 0) {
+      return
+    }
+  } catch {
+    # The retry guidance below covers process-launch and command failures alike.
+  }
+  Warn 'First-time setup did not finish. Run it again with: basecamp setup'
 }
 
 # Invoke-PostInstallSetup installs the baseline skill and connects coding agents
@@ -416,22 +443,22 @@ function Main {
 
     Write-Host ''
     if ($SkipSetup -eq '1') {
-      Step 'Skipping setup wizard (BASECAMP_SKIP_SETUP=1)'
+      Step 'Skipping first-time setup (BASECAMP_SKIP_SETUP=1)'
       # Still install the baseline skill and connect coding agents (best-effort).
       Invoke-PostInstallSetup $installedBinary
       Write-Host ''
       Write-Host '  Next steps:'
       Write-Host '    basecamp auth login        Authenticate with Basecamp'
-      Write-Host '    basecamp setup             Run interactive setup wizard'
+      Write-Host '    basecamp setup             Run first-time setup'
       Write-Host ''
-    } elseif ($isInteractive) {
-      & $installedBinary setup
-      Write-Host ''
-      Write-Host '  Next steps:'
-      Write-Host '    basecamp auth login        Authenticate with Basecamp'
-      Write-Host ''
+    } elseif ($isInteractive -and -not (Test-TruthyEnvironmentValue $env:BASECAMP_NONINTERACTIVE)) {
+      Invoke-FirstTimeSetup $installedBinary
     } else {
-      Info 'Skipping interactive setup because PowerShell is running non-interactively.'
+      if (Test-TruthyEnvironmentValue $env:BASECAMP_NONINTERACTIVE) {
+        Info 'Skipping first-time setup because BASECAMP_NONINTERACTIVE is enabled.'
+      } else {
+        Info 'Skipping first-time setup because PowerShell is running non-interactively.'
+      }
       # Install the baseline skill and connect coding agents (best-effort).
       Invoke-PostInstallSetup $installedBinary
       Write-Host ''

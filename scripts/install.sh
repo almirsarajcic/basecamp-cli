@@ -9,7 +9,11 @@
 #                       (default: ~/bin if on PATH, else ~/.local/bin if on PATH;
 #                        otherwise ~/bin on Windows, ~/.local/bin elsewhere)
 #   BASECAMP_VERSION    Specific version to install (default: latest)
-#   BASECAMP_SKIP_SETUP Set to 1 to skip the interactive setup wizard after install
+#   BASECAMP_SKIP_SETUP Set to 1 to skip first-time setup after install
+#                       (still runs `basecamp setup agents` to install the skill
+#                        and connect coding agents)
+#   BASECAMP_NONINTERACTIVE
+#                       Set to 1 or true to use non-interactive setup
 #                       (still runs `basecamp setup agents` to install the skill
 #                        and connect coding agents)
 #   BASECAMP_SETUP_AGENT
@@ -44,7 +48,28 @@ fi
 
 info()  { echo "  $(green "✓") $1"; }
 step()  { echo "  $(bold "→") $1"; }
+warn()  { echo "  $(bold "!") $1" >&2; }
 error() { echo "  $(red "✗ ERROR:") $1" >&2; exit 1; }
+
+env_value_is_true() {
+  case "$1" in
+    1|[Tt][Rr][Uu][Ee]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+can_run_first_time_setup() {
+  ! env_value_is_true "${BASECAMP_NONINTERACTIVE:-}" &&
+    [[ -t 1 ]] && [[ -t 2 ]] && { : </dev/tty; } 2>/dev/null
+}
+
+run_first_time_setup() {
+  local binary="$1"
+  if "$binary" setup; then
+    return 0
+  fi
+  warn "First-time setup did not finish. Run it again with: basecamp setup"
+}
 
 find_sha256_cmd() {
   if command -v sha256sum &>/dev/null; then
@@ -513,28 +538,33 @@ main() {
 
   echo ""
 
-  # Run interactive setup wizard only when stdin is a TTY and not explicitly skipped.
-  # Non-interactive environments (CI, piped input, coding agents like Claude Code
-  # or Codex) get the baseline skill installed, a best-effort agent connection via
-  # `setup agents`, and next-step instructions instead — the wizard requires
-  # interactive prompts that don't work without a terminal.
+  # Run first-time setup when a controlling terminal can handle OAuth approval.
+  # Non-interactive environments (CI, redirected output, coding agents like Claude
+  # Code or Codex) get the baseline skill installed, a best-effort agent connection
+  # via `setup agents`, and next-step instructions instead.
   if [[ "${BASECAMP_SKIP_SETUP:-}" == "1" ]]; then
-    step "Skipping setup wizard (BASECAMP_SKIP_SETUP=1)"
+    step "Skipping first-time setup (BASECAMP_SKIP_SETUP=1)"
     post_install_setup "$binary_name"
     echo ""
     echo "  Next steps:"
     echo "    $(bold "basecamp auth login")        Authenticate with Basecamp"
-    echo "    $(bold "basecamp setup")             Run interactive setup wizard"
+    echo "    $(bold "basecamp setup")             Run first-time setup"
     echo ""
-  elif [[ -t 0 ]] && [[ -t 1 ]]; then
-    "$BIN_DIR/$binary_name" setup
+  elif can_run_first_time_setup; then
+    # The canonical `curl ... | bash` install owns stdin while Bash reads the
+    # script. Give setup the controlling terminal so OAuth can complete.
+    run_first_time_setup "$BIN_DIR/$binary_name" </dev/tty
   else
-    info "Skipping interactive setup (no terminal detected)."
+    if env_value_is_true "${BASECAMP_NONINTERACTIVE:-}"; then
+      info "Skipping first-time setup (BASECAMP_NONINTERACTIVE enabled)."
+    else
+      info "Skipping first-time setup (no usable terminal detected)."
+    fi
     post_install_setup "$binary_name"
     echo ""
     echo "  Next steps:"
     echo "    $(bold "basecamp auth login")        Authenticate with Basecamp"
-    echo "    $(bold "basecamp setup")             Run interactive setup wizard"
+    echo "    $(bold "basecamp setup")             Run first-time setup"
     echo ""
   fi
 }
