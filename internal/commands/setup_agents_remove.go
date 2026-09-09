@@ -26,8 +26,9 @@ const agentRemoveTimeout = 20 * time.Second
 
 var legacyManagedSkillHashes = map[string]struct{}{
 	// Every unique skills/basecamp/SKILL.md payload shipped from v0.1.0 through
-	// v0.9.1, plus 17a00ac immediately before this command. Exact hashes let us
+	// v0.11.0, plus 17a00ac immediately before this command. Exact hashes let us
 	// recognize pre-marker wizard installs without claiming user-authored files.
+	// Any release that ships before the ownership marker does must be added here.
 	"9ba73c37394e2f3fd41b1fb88dfcb5765c8d28f817a4d8c186cb3bc6eb9b7c0b": {},
 	"5b8dbaee9258079695e078c2fffea835d53ac408aa1265fd5116fd4a8657aaed": {},
 	"7f388068176a382e1b452452e88ebb9a4712265ca777c81f47350df0845c8839": {},
@@ -39,6 +40,8 @@ var legacyManagedSkillHashes = map[string]struct{}{
 	"21dbba9a6419d3bbf215976e591cafb9fdb3f2a4ca7b20a9953efec7f9691e96": {},
 	"5bdfcb49c9808011087790c006f8665cc5d8a079961a1dcef760547d8dd9280c": {},
 	"a5e60a1c55ec381dab3265625d97461b7c32edd49837a03642abba347852421d": {},
+	"e1394abe6ff5affa3d94e8ea9b6460ebfd7ac06374070d7d5e10731004178bb3": {},
+	"dad3d2ed690e52fd22c28941665433814776fdb21a3adc5d3cd1b802d3ee9da7": {},
 }
 
 var runAgentRemoveCommand = func(ctx context.Context, path, dir string, args ...string) ([]byte, error) {

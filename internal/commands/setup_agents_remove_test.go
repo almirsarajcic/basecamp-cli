@@ -838,6 +838,8 @@ func TestLegacyManagedSkillHashAllowlistDoesNotShrink(t *testing.T) {
 		"21dbba9a6419d3bbf215976e591cafb9fdb3f2a4ca7b20a9953efec7f9691e96",
 		"5bdfcb49c9808011087790c006f8665cc5d8a079961a1dcef760547d8dd9280c",
 		"a5e60a1c55ec381dab3265625d97461b7c32edd49837a03642abba347852421d",
+		"e1394abe6ff5affa3d94e8ea9b6460ebfd7ac06374070d7d5e10731004178bb3",
+		"dad3d2ed690e52fd22c28941665433814776fdb21a3adc5d3cd1b802d3ee9da7",
 	}
 	for _, hash := range want {
 		_, ok := legacyManagedSkillHashes[hash]
