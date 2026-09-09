@@ -211,7 +211,7 @@ func TestProfileCreateRejectsInvalidNames(t *testing.T) {
 func TestProfileCreateHasExpectedFlags(t *testing.T) {
 	cmd := newProfileCreateCmd()
 
-	flags := []string{"base-url", "scope", "account", "no-browser", "remote", "local", "device-code"}
+	flags := []string{"base-url", "scope", "account", "no-browser", "remote", "local", "device-code", "expect-identity"}
 	for _, flag := range flags {
 		f := cmd.Flags().Lookup(flag)
 		assert.NotNil(t, f, "expected flag %q to exist on create command", flag)
@@ -1133,4 +1133,134 @@ func TestProfileCreateWithNilProfilesMap(t *testing.T) {
 	profiles, ok := result["profiles"].(map[string]any)
 	require.True(t, ok, "expected profiles map in config")
 	assert.Contains(t, profiles, "new-profile", "new profile should be created")
+}
+
+// TestProfileSetDefaultCreatesTheConfigDir: the global config directory may
+// not exist yet when the profiles came from another config layer.
+func TestProfileSetDefaultCreatesTheConfigDir(t *testing.T) {
+	t.Setenv("BASECAMP_NO_KEYRING", "1")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "fresh"))
+
+	app, _ := setupTestApp(t)
+	app.Config.Profiles = map[string]*config.ProfileConfig{"bot": {BaseURL: "https://3.basecampapi.com"}}
+
+	require.NoError(t, executeCommand(NewProfileCmd(), app, "set-default", "bot"))
+	data, err := os.ReadFile(filepath.Join(config.GlobalConfigDir(), "config.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"default_profile": "bot"`)
+}
+
+// TestProfileCreateRefusesAMalformedConfigBeforeLogin: registration happens
+// after OAuth, so a config file that cannot take the entry must be refused
+// before a credential exists to orphan.
+func TestProfileCreateRefusesAMalformedConfigBeforeLogin(t *testing.T) {
+	t.Setenv("BASECAMP_NO_KEYRING", "1")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	require.NoError(t, os.MkdirAll(config.GlobalConfigDir(), 0o700))
+	configPath := filepath.Join(config.GlobalConfigDir(), "config.json")
+	require.NoError(t, os.WriteFile(configPath, []byte(`{"profiles":[]}`), 0o600))
+
+	// Any network use would be a login attempt; the no-network transport
+	// fails instantly, and the assertion below is on the refusal wording.
+	app, _ := setupTestApp(t)
+	err := executeCommand(NewProfileCmd(), app, "create", "bot", "--device-code")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"profiles" value that is not an object`)
+	data, readErr := os.ReadFile(configPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, `{"profiles":[]}`, string(data))
+	_, loadErr := app.Auth.GetStore().Load("profile:bot")
+	assert.Error(t, loadErr, "no login may have run")
+}
+
+// TestProfileDeleteRefusesAMalformedConfigBeforeRemovingTheCredential: the
+// credential delete cannot be undone, so a config file that cannot take
+// the entry's removal is refused first and the credential stays.
+func TestProfileDeleteRefusesAMalformedConfigBeforeRemovingTheCredential(t *testing.T) {
+	cfg := &config.Config{
+		BaseURL:  "https://3.basecampapi.com",
+		CacheDir: t.TempDir(),
+		Sources:  make(map[string]string),
+		Profiles: map[string]*config.ProfileConfig{"bot": {BaseURL: "https://3.basecampapi.com"}},
+	}
+	app, _ := setupProfileTestApp(t, cfg)
+	require.NoError(t, app.Auth.GetStore().Save("profile:bot", &auth.Credentials{AccessToken: "keep"}))
+	configPath := filepath.Join(config.GlobalConfigDir(), "config.json")
+	require.NoError(t, os.WriteFile(configPath, []byte("{ not json"), 0o600))
+
+	err := executeProfileCommand(newProfileDeleteCmd(), app, "bot")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not valid JSON")
+	creds, loadErr := app.Auth.GetStore().Load("profile:bot")
+	require.NoError(t, loadErr, "the credential outlives a refused config write")
+	assert.Equal(t, "keep", creds.AccessToken)
+	data, readErr := os.ReadFile(configPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "{ not json", string(data))
+}
+
+// TestProfileSetDefaultRefusesANullConfig: a top-level null decodes into a
+// nil map; assigning into it would panic where the writers promise a
+// refusal.
+func TestProfileSetDefaultRefusesANullConfig(t *testing.T) {
+	t.Setenv("BASECAMP_NO_KEYRING", "1")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	require.NoError(t, os.MkdirAll(config.GlobalConfigDir(), 0o700))
+	configPath := filepath.Join(config.GlobalConfigDir(), "config.json")
+	require.NoError(t, os.WriteFile(configPath, []byte("null"), 0o600))
+
+	app, _ := setupTestApp(t)
+	app.Config.Profiles = map[string]*config.ProfileConfig{"bot": {BaseURL: "https://3.basecampapi.com"}}
+	err := executeCommand(NewProfileCmd(), app, "set-default", "bot")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a JSON object")
+	data, readErr := os.ReadFile(configPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "null", string(data))
+}
+
+// TestProfileCreateExpectIdentityCreatesNothingOnMismatch: profile create
+// is the OAuth login for a profile that does not exist yet, so it takes the
+// same assertion as auth login. A mismatch leaves no credential and no
+// profile entry; a match registers the profile with the verified person.
+func TestProfileCreateExpectIdentityCreatesNothingOnMismatch(t *testing.T) {
+	srv := startLoginIdentityServer(t, "dev-tok")
+	srv.srv.Config.Handler = deviceGrantThen(t, srv.srv.Config.Handler)
+	app, buf := loginTestApp(t, srv, &config.Config{})
+	t.Setenv("BASECAMP_OAUTH_ISSUER", srv.srv.URL)
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_CLIENT", "")
+	t.Setenv("SSH_TTY", "")
+	create := func(expect string) error {
+		return executeProfileCommand(NewProfileCmd(), app, "create", "bot", "--base-url", srv.srv.URL, "--account", "999", "--device-code", "--expect-identity", expect)
+	}
+
+	err := create("1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not identity 1")
+	assertNothingStored(t, app, "bot")
+
+	require.NoError(t, create("28142355"))
+	creds, err := app.Auth.GetStore().Load("profile:bot")
+	require.NoError(t, err)
+	assert.Equal(t, "dev-tok", creds.AccessToken)
+	assert.Equal(t, "51177542", creds.UserID, "the person comes from the account-scoped lookup")
+	assert.Contains(t, readGlobalConfig(t)["profiles"], "bot")
+	assert.Contains(t, srv.seenPaths(), "/999/my/profile.json")
+
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &envelope))
+	assert.Equal(t, float64(28142355), envelope.Data["identity"].(map[string]any)["id"])
+	assert.Equal(t, float64(51177542), envelope.Data["person"].(map[string]any)["id"])
+}
+
+func TestProfileCreateExpectIdentityRefusesEnvToken(t *testing.T) {
+	t.Setenv("BASECAMP_TOKEN", "env-tok")
+	app, _ := setupProfileTestApp(t, nil)
+	err := executeProfileCommand(NewProfileCmd(), app, "create", "bot", "--expect-identity", "1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "BASECAMP_TOKEN")
+	assertNothingStored(t, app, "bot")
 }

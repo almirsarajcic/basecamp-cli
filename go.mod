@@ -6,7 +6,7 @@ require (
 	charm.land/bubbles/v2 v2.2.1
 	charm.land/bubbletea/v2 v2.0.9
 	charm.land/lipgloss/v2 v2.0.6
-	github.com/basecamp/basecamp-sdk/go v0.16.0
+	github.com/basecamp/basecamp-sdk/go v0.16.1-0.20260903193203-47e7ca381a49
 	github.com/basecamp/cli v0.2.2-0.20260828230226-767413fc712d
 	github.com/basecamp/mcp v0.0.0-20260828100356-2d6f44b51e9d
 	github.com/basecamp/surfguard/go v0.1.0
@@ -141,7 +141,7 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
-	google.golang.org/grpc v1.83.1 // indirect
+	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 )
