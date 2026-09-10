@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/basecamp/basecamp-cli/internal/appctx"
+	"github.com/basecamp/basecamp-cli/internal/harness"
 	"github.com/basecamp/basecamp-cli/internal/output"
 )
 
@@ -77,11 +78,18 @@ func runSetupAgentsStyled(t *testing.T) string {
 }
 
 // emptyHome points HOME and PATH at empty temp dirs so no agent is detected.
+// emptyHome isolates a test from the developer's machine: an empty home
+// (HOME, and USERPROFILE for os.UserHomeDir on Windows), an empty PATH, and
+// no shared-skill agent home override such as GROK_HOME.
 func emptyHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("PATH", filepath.Join(home, "empty-bin"))
+	for _, agent := range harness.SkillAgents() {
+		t.Setenv(agent.HomeEnv, "")
+	}
 	return home
 }
 
@@ -146,6 +154,27 @@ func TestSetupAgentsBaselineSkillFailure(t *testing.T) {
 	assert.Contains(t, env.Data.Errors[0], "skill:")
 }
 
+// A shared-skill agent detected by its home directory never needed a binary
+// to connect, so when the shared skill is what failed, the missing-binary
+// remediation would name the wrong cause; the skill error already names it.
+func TestSetupAgentsSkillAgentSkillFailureIsNotABinaryProblem(t *testing.T) {
+	forEachSkillAgent(t, func(t *testing.T, agent harness.SkillAgent) {
+		home := emptyHome(t)
+		require.NoError(t, os.MkdirAll(filepath.Join(home, agent.HomeDir), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(home, ".agents"), []byte("blocker"), 0o644))
+		t.Setenv("BASECAMP_SETUP_AGENT", agent.ID)
+
+		env := runSetupAgentsJSON(t)
+
+		assert.False(t, env.Data.SkillInstalled)
+		assert.Contains(t, env.Data.Errors[0], "skill:")
+		for _, warning := range env.Data.Warnings {
+			assert.NotContains(t, warning, "binary not found", "the binary did not block %s", agent.Name)
+		}
+		assert.NotContains(t, env.Data.ManualCommands, "basecamp setup "+agent.ID)
+	})
+}
+
 func TestSetupAgentsSingleDetectedCodex(t *testing.T) {
 	installCodexStub(t, codexStubOptions{})
 	t.Setenv("BASECAMP_SETUP_AGENT", "")
@@ -191,11 +220,12 @@ func TestSetupAgentsAllForcesEveryHandler(t *testing.T) {
 		env := runSetupAgentsJSON(t)
 
 		assert.Equal(t, "all", env.Data.Selector)
-		assert.Equal(t, []string{"claude", "codex"}, env.Data.AttemptedAgents)
-		// Both binaries absent → symmetric synthesized remediation.
+		assert.Equal(t, []string{"claude", "codex", "grok"}, env.Data.AttemptedAgents)
+		// Every binary absent → symmetric synthesized remediation.
 		assert.Contains(t, env.Data.ManualCommands, "basecamp setup claude")
 		assert.Contains(t, env.Data.ManualCommands, "basecamp setup codex")
-		require.GreaterOrEqual(t, len(env.Data.Warnings), 2)
+		assert.Contains(t, env.Data.ManualCommands, "basecamp setup grok")
+		require.GreaterOrEqual(t, len(env.Data.Warnings), 3)
 	})
 
 	t.Run("one detected", func(t *testing.T) {
@@ -204,7 +234,7 @@ func TestSetupAgentsAllForcesEveryHandler(t *testing.T) {
 
 		env := runSetupAgentsJSON(t)
 
-		assert.Equal(t, []string{"claude", "codex"}, env.Data.AttemptedAgents)
+		assert.Equal(t, []string{"claude", "codex", "grok"}, env.Data.AttemptedAgents)
 		// Claude binary absent → synthesized; codex present and healthy → not.
 		assert.Contains(t, env.Data.ManualCommands, "basecamp setup claude")
 		assert.NotContains(t, env.Data.ManualCommands, "basecamp setup codex")
@@ -219,10 +249,103 @@ func TestSetupAgentsAllForcesEveryHandler(t *testing.T) {
 		env := runSetupAgentsJSON(t)
 
 		assert.False(t, env.Data.Ambiguous, "explicit selector is never ambiguous")
-		assert.Equal(t, []string{"claude", "codex"}, env.Data.AttemptedAgents)
+		assert.Equal(t, []string{"claude", "codex", "grok"}, env.Data.AttemptedAgents)
 		assert.Contains(t, env.Data.ManualCommands, "basecamp setup claude")
 		assert.Contains(t, env.Data.ManualCommands, "basecamp setup codex")
 	})
+}
+
+// forEachSkillAgent runs a test once per shared-skill agent: their setup is
+// one code path, so their coverage is one test.
+func forEachSkillAgent(t *testing.T, test func(t *testing.T, agent harness.SkillAgent)) {
+	t.Helper()
+	for _, agent := range harness.SkillAgents() {
+		t.Run(agent.ID, func(t *testing.T) { test(t, agent) })
+	}
+}
+
+// A shared-skill agent detected by its home directory alone connects: its
+// whole integration is the skill `setup agents` just installed, so no binary
+// is needed and no missing-binary remediation is synthesized.
+func TestSetupAgentsSingleDetectedSkillAgent(t *testing.T) {
+	forEachSkillAgent(t, func(t *testing.T, agent harness.SkillAgent) {
+		home := emptyHome(t)
+		t.Setenv(agent.HomeEnv, "")
+		require.NoError(t, os.MkdirAll(filepath.Join(home, agent.HomeDir), 0o755))
+		t.Setenv("BASECAMP_SETUP_AGENT", "")
+
+		env := runSetupAgentsJSON(t)
+
+		assert.Equal(t, "auto", env.Data.Selector)
+		assert.False(t, env.Data.Ambiguous)
+		assert.Equal(t, []string{agent.ID}, env.Data.AttemptedAgents)
+		require.Len(t, env.Data.Agents, 1)
+		assert.Equal(t, agent.ID, env.Data.Agents[0].ID)
+		assert.True(t, env.Data.Agents[0].DetectedBefore)
+		assert.True(t, env.Data.Agents[0].DetectedAfter)
+		assert.True(t, env.Data.Agents[0].PluginInstalled)
+		assert.Empty(t, env.Data.Errors)
+		assert.Empty(t, env.Data.Warnings)
+		assert.Empty(t, env.Data.ManualCommands)
+		assert.Equal(t, "Installed baseline skill; connected "+agent.Name, env.Summary)
+	})
+}
+
+// The selector accepts every registered id, a shared-skill agent's included.
+func TestSetupAgentsSkillAgentSelector(t *testing.T) {
+	forEachSkillAgent(t, func(t *testing.T, agent harness.SkillAgent) {
+		home := emptyHome(t)
+		t.Setenv(agent.HomeEnv, "")
+		require.NoError(t, os.MkdirAll(filepath.Join(home, agent.HomeDir), 0o755))
+		require.NoError(t, os.MkdirAll(filepath.Join(home, ".codex"), 0o755))
+		t.Setenv("BASECAMP_SETUP_AGENT", agent.ID)
+
+		env := runSetupAgentsJSON(t)
+
+		assert.Equal(t, agent.ID, env.Data.Selector)
+		assert.False(t, env.Data.Ambiguous, "an explicit selector is never ambiguous")
+		assert.Equal(t, []string{agent.ID}, env.Data.AttemptedAgents)
+		assert.Equal(t, []string{"codex", agent.ID}, env.Data.DetectedBefore)
+		assert.Empty(t, env.Data.Errors)
+	})
+}
+
+// An explicitly selected shared-skill agent that is not on the machine is a
+// failed connection with the agent's own remediation — and its home directory
+// is never fabricated to make the next detection lie.
+func TestSetupAgentsSkillAgentNotDetected(t *testing.T) {
+	forEachSkillAgent(t, func(t *testing.T, agent harness.SkillAgent) {
+		home := emptyHome(t)
+		t.Setenv(agent.HomeEnv, "")
+		t.Setenv("BASECAMP_SETUP_AGENT", agent.ID)
+
+		env := runSetupAgentsJSON(t)
+
+		assert.Equal(t, agent.ID, env.Data.Selector)
+		assert.True(t, env.Data.SkillInstalled, "the shared skill is installed regardless")
+		require.Len(t, env.Data.Agents, 1)
+		assert.False(t, env.Data.Agents[0].DetectedBefore)
+		assert.False(t, env.Data.Agents[0].DetectedAfter)
+		assert.False(t, env.Data.Agents[0].PluginInstalled, "a passing skill check is not a connection when the handler refused")
+		require.NotEmpty(t, env.Data.Errors)
+		assert.Contains(t, env.Data.Errors[0], agent.ID+": "+agent.Name+" not detected")
+		assert.Equal(t, []string{"basecamp setup " + agent.ID}, env.Data.ManualCommands)
+		assert.Equal(t, "Installed baseline skill; attempted "+agent.Name, env.Summary)
+		assert.NoFileExists(t, filepath.Join(home, agent.HomeDir))
+	})
+}
+
+// The unknown-value warning names every accepted selector, so a new agent row
+// shows up in the message without anyone editing it.
+func TestSetupAgentsInvalidSelectorListsEveryAgent(t *testing.T) {
+	emptyHome(t)
+	t.Setenv("BASECAMP_SETUP_AGENT", "frobnicate")
+
+	env := runSetupAgentsJSON(t)
+
+	require.NotEmpty(t, env.Data.Warnings)
+	assert.Contains(t, env.Data.Warnings[0], "expected claude, codex, grok, all, or none")
+	assert.Equal(t, "claude, codex, grok, all, or none", agentSelectorProse())
 }
 
 // TestSetupAgentsCodexMissingBinary asserts the real missing-binary contract:

@@ -110,9 +110,10 @@ type codexPluginState struct {
 
 func init() {
 	RegisterAgent(AgentInfo{
-		Name:   "Codex",
-		ID:     "codex",
-		Detect: DetectCodex,
+		Name:       "Codex",
+		ID:         "codex",
+		Detect:     DetectCodex,
+		FindBinary: FindCodexBinary,
 		Checks: func() []*StatusCheck {
 			return []*StatusCheck{CheckCodexPlugin()}
 		},
