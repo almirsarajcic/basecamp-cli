@@ -279,13 +279,21 @@ func TestSetupAgentsRemovePreservesUserFilesBesideMarkerlessManagedSkill(t *test
 	require.NoError(t, os.WriteFile(filepath.Join(dir, skillFilename), embedded, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("keep me"), 0o600))
 
+	link := filepath.Join(home, ".claude", "skills", "basecamp")
+	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+	require.NoError(t, os.Symlink(dir, link))
+
 	_, err = runSetupAgentsRemove(t)
 	require.NoError(t, err)
 	_, statErr := os.Lstat(filepath.Join(dir, skillFilename))
 	assert.True(t, os.IsNotExist(statErr))
+	_, linkErr := os.Lstat(link)
+	assert.True(t, os.IsNotExist(linkErr), "remove the managed link before stripping the legacy baseline")
 	data, readErr := os.ReadFile(filepath.Join(dir, "notes.txt"))
 	require.NoError(t, readErr)
 	assert.Equal(t, "keep me", string(data))
+	_, err = runSetupAgentsRemove(t)
+	require.NoError(t, err, "removal remains idempotent with user files left behind")
 }
 
 func TestSetupAgentsRemoveUsesAbsoluteClaudeConfigWithInvalidRelativeHome(t *testing.T) {

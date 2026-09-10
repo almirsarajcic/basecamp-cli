@@ -646,8 +646,9 @@ func ownedOrLegacySkillDir(dir string) bool {
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return false
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != skillFilename || !entries[0].Type().IsRegular() {
+	// Extra user files do not change ownership of the legacy payload. Cleanup
+	// removes only that payload and its managed link, leaving those files intact.
+	if !regularFile(filepath.Join(dir, skillFilename)) {
 		return false
 	}
 	installed, err := os.ReadFile(filepath.Join(dir, skillFilename)) //nolint:gosec // fixed skill path
