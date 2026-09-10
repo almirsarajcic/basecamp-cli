@@ -869,6 +869,79 @@ func TestLoginRemoteAndLocalMutuallyExclusive(t *testing.T) {
 	assert.Contains(t, err.Error(), "mutually exclusive")
 }
 
+// TestLoginDefaultsNeverOpenABrowserUnderNonInteractiveEnv: whatever flow a
+// caller reaches under the variable, no browser is launched for it — the
+// device flow prints its code instead, which is the shape the variable's
+// callers can relay.
+func TestLoginDefaultsNeverOpenABrowserUnderNonInteractiveEnv(t *testing.T) {
+	t.Setenv("BASECAMP_NONINTERACTIVE", "1")
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_CLIENT", "")
+	t.Setenv("SSH_TTY", "")
+	opts := LoginOptions{Local: true}
+	opts.defaults()
+	assert.True(t, opts.NoBrowser)
+	assert.Nil(t, opts.BrowserLauncher)
+}
+
+// TestLoginLaunchpadRefusesNonInteractiveEnv: both Launchpad shapes wait on a
+// person — a browser at the loopback callback, or a pasted redirect URL —
+// and every login entry point reaches them through loginLaunchpad. Under
+// BASECAMP_NONINTERACTIVE they become an actionable error before a browser
+// is launched, a listener opened, or a byte of stdin read.
+func TestLoginLaunchpadRefusesNonInteractiveEnv(t *testing.T) {
+	for name, opts := range map[string]LoginOptions{
+		"local":  {Local: true},
+		"remote": {Remote: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.NotFound(w, r)
+			}))
+			defer srv.Close()
+
+			tmpDir := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", tmpDir)
+			t.Setenv("BASECAMP_LAUNCHPAD_URL", srv.URL)
+			t.Setenv("BASECAMP_NONINTERACTIVE", "1")
+
+			cfg := &config.Config{BaseURL: srv.URL}
+			m := NewManager(cfg, srv.Client())
+			m.store = newTestStore(t, tmpDir)
+
+			sl := newSyncLogger()
+			pr, pw := io.Pipe()
+			defer pr.Close()
+			defer pw.Close()
+			opts.Logger = sl.log
+			opts.InputReader = pr
+			opts.BrowserLauncher = func(string) error {
+				t.Error("browser launched under BASECAMP_NONINTERACTIVE")
+				return nil
+			}
+
+			errCh := make(chan error, 1)
+			go func() {
+				_, err := m.Login(context.Background(), opts)
+				errCh <- err
+			}()
+
+			select {
+			case err := <-errCh:
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "BASECAMP_NONINTERACTIVE")
+				assert.Contains(t, err.Error(), "--with-token")
+			case <-time.After(5 * time.Second):
+				t.Fatal("Launchpad login waited on a person under BASECAMP_NONINTERACTIVE")
+			}
+			for _, line := range sl.snapshot() {
+				assert.NotContains(t, line, "Paste the callback URL")
+				assert.NotContains(t, line, "Opening browser")
+			}
+		})
+	}
+}
+
 func TestLoginRemoteMode(t *testing.T) {
 	// No protected-resource metadata (404) => Launchpad fallback, pointed
 	// at this server via BASECAMP_LAUNCHPAD_URL.

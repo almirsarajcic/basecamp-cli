@@ -246,6 +246,10 @@ Examples:
 				profileCfg.AccountID = accountID
 			}
 
+			if err := refuseNonInteractiveLogin(deviceCode); err != nil {
+				return err
+			}
+
 			// The entry is written only after the login succeeds, so prove
 			// the config file can take it before a credential exists to
 			// orphan: a malformed file is refused here, not after OAuth.
