@@ -1,7 +1,7 @@
 {
   "source": "github.com/basecamp/basecamp-sdk",
-  "commit": "6e73a06f4262062b2c973b2d0787ab0029b08d0d",
-  "ref": "go/v0.17.0",
+  "commit": "400c76ca433d5ae08e1e7d6a561ab113949c70d8",
+  "ref": "go/v0.18.0",
   "files": ["behavior-model.json", "openapi.json"],
   "synced_by": "scripts/sync-mcp-model.sh",
   "patches": "tags assigned to operations the export leaves untagged (PATCHED_TAGS); binary-upload operations dropped (EXCLUDED_OPERATIONS) — see the sync script"
