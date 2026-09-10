@@ -783,6 +783,12 @@ func recognizedManagedSkillPayload(data []byte) bool {
 }
 
 func ownedSkillDir(dir string) bool {
+	// Parent aliases are supported, but a marker beyond a symlinked skill leaf
+	// does not establish ownership of that leaf.
+	info, err := os.Lstat(dir)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false
+	}
 	return regularFile(filepath.Join(dir, ownershipMarkerFile)) || regularFile(filepath.Join(dir, installedVersionFile))
 }
 

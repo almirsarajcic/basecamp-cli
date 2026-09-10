@@ -244,10 +244,13 @@ func claimPredefinedSkillDirForWrite(dir string) (bool, error) {
 	if homeErr != nil {
 		return false, &unmanagedSkillDirError{dir: dir}
 	}
-	resolved, resolveErr := filepath.EvalSymlinks(dir)
 	canonical := filepath.Join(home, ".agents", "skills", "basecamp")
+	if !ownedSkillDir(canonical) {
+		return false, &unmanagedSkillDirError{dir: dir}
+	}
+	resolved, resolveErr := filepath.EvalSymlinks(dir)
 	resolvedCanonical, canonicalErr := filepath.EvalSymlinks(canonical)
-	if resolveErr == nil && canonicalErr == nil && filepath.Clean(resolved) == filepath.Clean(resolvedCanonical) && ownedSkillDir(resolvedCanonical) {
+	if resolveErr == nil && canonicalErr == nil && filepath.Clean(resolved) == filepath.Clean(resolvedCanonical) {
 		return false, nil
 	}
 	return false, &unmanagedSkillDirError{dir: dir}

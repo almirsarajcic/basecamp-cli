@@ -173,6 +173,21 @@ func TestClaimPredefinedSkillDirAcceptsManagedCanonicalLinkOnly(t *testing.T) {
 	require.ErrorAs(t, claimPredefinedSkillDir(unrelatedLink), &unmanaged)
 }
 
+func TestClaimPredefinedSkillDirRejectsSymlinkedCanonicalLeaf(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	target := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(target, ownershipMarkerFile), []byte("managed"), 0o600))
+	canonical := filepath.Join(home, ".agents", "skills", "basecamp")
+	require.NoError(t, os.MkdirAll(filepath.Dir(canonical), 0o755))
+	require.NoError(t, os.Symlink(target, canonical))
+	link := filepath.Join(t.TempDir(), "basecamp")
+	require.NoError(t, os.Symlink(canonical, link))
+
+	var unmanaged *unmanagedSkillDirError
+	require.ErrorAs(t, claimPredefinedSkillDir(link), &unmanaged)
+}
+
 func TestWizardSkillLocationsUsesClaudeConfigDir(t *testing.T) {
 	custom := filepath.Join(t.TempDir(), "claude")
 	t.Setenv("CLAUDE_CONFIG_DIR", custom)

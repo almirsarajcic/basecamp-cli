@@ -380,6 +380,30 @@ func TestSetupAgentsRemoveDeletesClaudeLinkThroughConfigAlias(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr))
 }
 
+func TestSetupAgentsRemovePreservesSymlinkedBaselineLeaf(t *testing.T) {
+	home := emptyHome(t)
+	target := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(target, ownershipMarkerFile), []byte("managed"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(target, skillFilename), []byte("keep me"), 0o600))
+	baseline := filepath.Join(home, ".agents", "skills", "basecamp")
+	require.NoError(t, os.MkdirAll(filepath.Dir(baseline), 0o755))
+	require.NoError(t, os.Symlink(target, baseline))
+	link := filepath.Join(home, ".claude", "skills", "basecamp")
+	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+	require.NoError(t, os.Symlink(baseline, link))
+
+	_, err := runSetupAgentsRemove(t)
+	require.NoError(t, err)
+	for _, path := range []string{baseline, link} {
+		info, err := os.Lstat(path)
+		require.NoError(t, err, "preserve the user-owned link %s", path)
+		assert.NotZero(t, info.Mode()&os.ModeSymlink)
+	}
+	data, err := os.ReadFile(filepath.Join(target, skillFilename))
+	require.NoError(t, err)
+	assert.Equal(t, "keep me", string(data))
+}
+
 func TestRemoveClaudeSkillPreservesLinkToUnmanagedBaseline(t *testing.T) {
 	home := t.TempDir()
 	baseline := filepath.Join(home, ".agents", "skills", "basecamp")
