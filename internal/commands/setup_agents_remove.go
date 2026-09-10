@@ -104,6 +104,9 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 		baseline = filepath.Join(home, ".agents", "skills", "basecamp")
 	}
 	claudeConfig, claudeConfigErr := harness.ClaudeConfigDir()
+	// A managed Claude link can only be recognized while the baseline it points
+	// at is still present, so the baseline cleanup is deferred until every link
+	// slot has been inspected. Any failure there keeps the baseline for a retry.
 	claudeLinksHandled := claudeConfigErr == nil
 	if claudeConfigErr != nil {
 		failures = append(failures, "Claude Code configuration: "+claudeConfigErr.Error())
@@ -119,18 +122,7 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 		// Keep that baseline intact until every other managed link has been
 		// inspected, then remove it in the final baseline cleanup below.
 		if baseline == "" || !pathEntriesEquivalent(claudeSkill, baseline) {
-			claudeRoot := claudeConfig
-			if os.Getenv("CLAUDE_CONFIG_DIR") == "" {
-				claudeRoot = home
-			}
-			safe, safeErr := safeSkillTraversal(claudeRoot, claudeSkill)
-			if safeErr != nil {
-				claudeLinksHandled = false
-				failures = append(failures, "Claude Code skill: "+safeErr.Error())
-			} else if !safe {
-				claudeLinksHandled = false
-				failures = append(failures, "Claude Code skill: unsafe symlink traversal skipped")
-			} else if didRemove, removeErr := removeClaudeSkill(claudeSkill, baseline); removeErr != nil {
+			if didRemove, removeErr := removeClaudeSkill(claudeSkill, baseline); removeErr != nil {
 				claudeLinksHandled = false
 				failures = append(failures, "Claude Code skill: "+removeErr.Error())
 			} else if didRemove {
@@ -151,14 +143,7 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 		configuredClaudeSkill = filepath.Join(claudeConfig, "skills", "basecamp")
 	}
 	if legacyClaudeSkill != "" && (configuredClaudeSkill == "" || !pathEntriesEquivalent(legacyClaudeSkill, configuredClaudeSkill)) {
-		safe, safeErr := safeSkillTraversal(home, legacyClaudeSkill)
-		if safeErr != nil {
-			claudeLinksHandled = false
-			failures = append(failures, "legacy Claude Code skill: "+safeErr.Error())
-		} else if !safe {
-			claudeLinksHandled = false
-			failures = append(failures, "legacy Claude Code skill: unsafe symlink traversal skipped")
-		} else if didRemove, removeErr := removeClaudeSkill(legacyClaudeSkill, baseline); removeErr != nil {
+		if didRemove, removeErr := removeClaudeSkill(legacyClaudeSkill, baseline); removeErr != nil {
 			claudeLinksHandled = false
 			failures = append(failures, "legacy Claude Code skill: "+removeErr.Error())
 		} else if didRemove {
@@ -167,21 +152,10 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 	}
 	projectClaudeSkill := filepath.Join(".claude", "skills", "basecamp")
 	if !pathEntriesEquivalent(projectClaudeSkill, configuredClaudeSkill) && !pathEntriesEquivalent(projectClaudeSkill, legacyClaudeSkill) {
-		projectRoot, rootErr := os.Getwd()
-		symlinked := false
-		if rootErr == nil {
-			symlinked, rootErr = hasSymlinkComponent(projectRoot, projectClaudeSkill)
-		}
-		if rootErr != nil {
-			failures = append(failures, "project Claude Code skill: "+rootErr.Error())
-		} else if symlinked {
-			failures = append(failures, "project Claude Code skill: unsafe symlink traversal skipped")
-		} else {
-			if didRemove, removeErr := removeOwnedOrLegacySkill(projectClaudeSkill); removeErr != nil {
-				failures = append(failures, "project Claude Code skill: "+removeErr.Error())
-			} else if didRemove {
-				removed = append(removed, "project Claude Code skill")
-			}
+		if didRemove, removeErr := removeOwnedOrLegacySkill(projectClaudeSkill); removeErr != nil {
+			failures = append(failures, "project Claude Code skill: "+removeErr.Error())
+		} else if didRemove {
+			removed = append(removed, "project Claude Code skill")
 		}
 	}
 
@@ -205,16 +179,9 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 		codexSkill = filepath.Join(resolvedCodexHome, "skills", "basecamp")
 	}
 	if codexSkill != "" && !pathEntriesEquivalent(codexSkill, baseline) {
-		codexRoot := resolvedCodexHome
-		if os.Getenv("CODEX_HOME") == "" {
-			codexRoot = home
-		}
-		safe, safeErr := safeSkillTraversal(codexRoot, codexSkill)
-		if safeErr != nil {
-			failures = append(failures, "Codex skill: "+safeErr.Error())
-		} else if !safe {
-			failures = append(failures, "Codex skill: unsafe symlink traversal skipped")
-		} else if didRemove, removeErr := removeOwnedOrLegacyCodexSkill(codexSkill); removeErr != nil {
+		// The old wizard wrote its Codex payload straight here, so this may be a
+		// pre-marker install recognized by its exact shipped SKILL.md.
+		if didRemove, removeErr := removeOwnedOrLegacySkill(codexSkill); removeErr != nil {
 			failures = append(failures, "Codex skill: "+removeErr.Error())
 		} else if didRemove {
 			removed = append(removed, "Codex skill")
@@ -226,12 +193,7 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 	}
 	if legacyCodexSkill != "" && !pathEntriesEquivalent(legacyCodexSkill, codexSkill) &&
 		!pathEntriesEquivalent(legacyCodexSkill, baseline) {
-		safe, safeErr := safeSkillTraversal(home, legacyCodexSkill)
-		if safeErr != nil {
-			failures = append(failures, "legacy Codex skill: "+safeErr.Error())
-		} else if !safe {
-			failures = append(failures, "legacy Codex skill: unsafe symlink traversal skipped")
-		} else if didRemove, removeErr := removeOwnedOrLegacyCodexSkill(legacyCodexSkill); removeErr != nil {
+		if didRemove, removeErr := removeOwnedOrLegacySkill(legacyCodexSkill); removeErr != nil {
 			failures = append(failures, "legacy Codex skill: "+removeErr.Error())
 		} else if didRemove {
 			removed = append(removed, "legacy Codex skill")
@@ -240,16 +202,8 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 
 	removeOpenCodeSkills(home, &removed, &failures)
 
-	// A managed Claude link can only be recognized while its managed baseline
-	// remains intact. Retain the baseline after any link-slot inspection or
-	// removal failure so a retry can still prove and remove the link.
 	if baseline != "" && claudeLinksHandled {
-		safe, safeErr := safeSkillTraversal(home, baseline)
-		if safeErr != nil {
-			failures = append(failures, "agent skill: "+safeErr.Error())
-		} else if !safe {
-			failures = append(failures, "agent skill: unsafe symlink traversal skipped")
-		} else if didRemove, removeErr := removeOwnedOrLegacySkill(baseline); removeErr != nil {
+		if didRemove, removeErr := removeOwnedOrLegacySkill(baseline); removeErr != nil {
 			failures = append(failures, "agent skill: "+removeErr.Error())
 		} else if didRemove {
 			removed = append(removed, "agent skill")
@@ -278,19 +232,17 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 func removeOpenCodeSkills(home string, removed, failures *[]string) {
 	locations := append(append([]skillLocation{}, skillLocations...), legacySkillLocations...)
 	seen := make(map[string]struct{})
-	projectRoot, projectRootErr := os.Getwd()
+	_, projectRootErr := os.Getwd()
 	for _, location := range locations {
 		if !strings.HasPrefix(location.Name, "OpenCode") {
 			continue
 		}
 		path := location.Path
-		root := projectRoot
 		if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, "~\\") {
 			if home == "" {
 				continue
 			}
 			path = filepath.Join(home, path[2:])
-			root = home
 		} else if projectRootErr != nil {
 			*failures = append(*failures, location.Name+" skill: getting working directory: "+projectRootErr.Error())
 			continue
@@ -306,15 +258,6 @@ func removeOpenCodeSkills(home string, removed, failures *[]string) {
 			continue
 		}
 		seen[dir] = struct{}{}
-		symlinked, inspectErr := hasSymlinkComponent(root, dir)
-		if inspectErr != nil {
-			*failures = append(*failures, location.Name+" skill: "+inspectErr.Error())
-			continue
-		}
-		if symlinked {
-			*failures = append(*failures, location.Name+" skill: unsafe symlink traversal skipped")
-			continue
-		}
 		didRemove, err := removeOwnedOrLegacySkill(dir)
 		if err != nil {
 			*failures = append(*failures, location.Name+" skill: "+err.Error())
@@ -322,51 +265,6 @@ func removeOpenCodeSkills(home string, removed, failures *[]string) {
 			*removed = append(*removed, location.Name+" skill")
 		}
 	}
-}
-
-// hasSymlinkComponent refuses traversal through user-controlled aliases below
-// a trusted installation root. Cleanup may inspect the root itself, but it must
-// never follow a symlink in a predefined path into an unrelated directory.
-func hasSymlinkComponent(root, target string) (bool, error) {
-	root, rootErr := filepath.Abs(filepath.Clean(root))
-	if rootErr != nil {
-		return false, fmt.Errorf("resolving cleanup root: %w", rootErr)
-	}
-	target, targetErr := filepath.Abs(filepath.Clean(target))
-	if targetErr != nil {
-		return false, fmt.Errorf("resolving cleanup target: %w", targetErr)
-	}
-	relative, err := filepath.Rel(root, target)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return false, fmt.Errorf("cleanup target %s is outside %s", target, root)
-	}
-
-	current := root
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
-		if component == "" || component == "." {
-			continue
-		}
-		current = filepath.Join(current, component)
-		info, statErr := os.Lstat(current)
-		if os.IsNotExist(statErr) {
-			return false, nil
-		}
-		if statErr != nil {
-			return false, fmt.Errorf("inspecting %s: %w", current, statErr)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func safeSkillTraversal(root, target string) (bool, error) {
-	if root == "" {
-		return false, errors.New("cleanup root is unavailable")
-	}
-	symlinked, err := hasSymlinkComponent(root, filepath.Dir(target))
-	return !symlinked, err
 }
 
 func removeClaudePlugin(parent context.Context, configDir string) (bool, []string) {
@@ -827,14 +725,10 @@ func removeOwnedSkillFiles(dir string) (bool, error) {
 	return true, nil
 }
 
-// removeOwnedOrLegacyCodexSkill also recognizes the old wizard's direct Codex
-// install, which predates ownership markers. Exact embedded content plus a flat,
-// allowlisted directory is the required provenance; a merely similar skill is
-// user state and remains untouched.
-func removeOwnedOrLegacyCodexSkill(dir string) (bool, error) {
-	return removeOwnedOrLegacySkill(dir)
-}
-
+// removeOwnedOrLegacySkill also recognizes installs that predate the ownership
+// marker, such as the old wizard's direct Codex payload. Exact embedded or
+// allowlisted content in a directory holding nothing else of ours is the
+// required provenance; a merely similar skill is user state and stays put.
 func removeOwnedOrLegacySkill(dir string) (bool, error) {
 	if ownedSkillDir(dir) {
 		return removeOwnedSkillFiles(dir)

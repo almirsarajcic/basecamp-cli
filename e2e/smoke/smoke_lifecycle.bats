@@ -97,6 +97,14 @@ load smoke_helper
   mark_out_of_scope "Depends on templates construct (OOS)"
 }
 
+@test "templates copy is out of scope" {
+  mark_out_of_scope "Copies a to-do list into a project and may grant project access"
+}
+
+@test "templates copy-status is out of scope" {
+  mark_out_of_scope "Depends on templates copy (OOS)"
+}
+
 @test "templates create is out of scope" {
   mark_out_of_scope "Account-wide template mutation"
 }
@@ -127,6 +135,26 @@ load smoke_helper
 
 @test "people remove is out of scope" {
   mark_out_of_scope "Modifies project membership"
+}
+
+@test "people clients add is out of scope" {
+  mark_out_of_scope "Modifies project membership"
+}
+
+@test "people clients remove is out of scope" {
+  mark_out_of_scope "Modifies project membership"
+}
+
+@test "people clients invite is out of scope" {
+  mark_out_of_scope "Invites a new client by email — consumes an account seat"
+}
+
+@test "people clients enable is out of scope" {
+  mark_out_of_scope "Reconfigures project-wide client visibility"
+}
+
+@test "people clients disable is out of scope" {
+  mark_out_of_scope "Reconfigures project-wide client visibility"
 }
 
 @test "todos sweep is out of scope" {

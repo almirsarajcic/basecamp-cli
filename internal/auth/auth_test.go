@@ -869,6 +869,79 @@ func TestLoginRemoteAndLocalMutuallyExclusive(t *testing.T) {
 	assert.Contains(t, err.Error(), "mutually exclusive")
 }
 
+// TestLoginDefaultsNeverOpenABrowserUnderNonInteractiveEnv: whatever flow a
+// caller reaches under the variable, no browser is launched for it — the
+// device flow prints its code instead, which is the shape the variable's
+// callers can relay.
+func TestLoginDefaultsNeverOpenABrowserUnderNonInteractiveEnv(t *testing.T) {
+	t.Setenv("BASECAMP_NONINTERACTIVE", "1")
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_CLIENT", "")
+	t.Setenv("SSH_TTY", "")
+	opts := LoginOptions{Local: true}
+	opts.defaults()
+	assert.True(t, opts.NoBrowser)
+	assert.Nil(t, opts.BrowserLauncher)
+}
+
+// TestLoginLaunchpadRefusesNonInteractiveEnv: both Launchpad shapes wait on a
+// person — a browser at the loopback callback, or a pasted redirect URL —
+// and every login entry point reaches them through loginLaunchpad. Under
+// BASECAMP_NONINTERACTIVE they become an actionable error before a browser
+// is launched, a listener opened, or a byte of stdin read.
+func TestLoginLaunchpadRefusesNonInteractiveEnv(t *testing.T) {
+	for name, opts := range map[string]LoginOptions{
+		"local":  {Local: true},
+		"remote": {Remote: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.NotFound(w, r)
+			}))
+			defer srv.Close()
+
+			tmpDir := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", tmpDir)
+			t.Setenv("BASECAMP_LAUNCHPAD_URL", srv.URL)
+			t.Setenv("BASECAMP_NONINTERACTIVE", "1")
+
+			cfg := &config.Config{BaseURL: srv.URL}
+			m := NewManager(cfg, srv.Client())
+			m.store = newTestStore(t, tmpDir)
+
+			sl := newSyncLogger()
+			pr, pw := io.Pipe()
+			defer pr.Close()
+			defer pw.Close()
+			opts.Logger = sl.log
+			opts.InputReader = pr
+			opts.BrowserLauncher = func(string) error {
+				t.Error("browser launched under BASECAMP_NONINTERACTIVE")
+				return nil
+			}
+
+			errCh := make(chan error, 1)
+			go func() {
+				_, err := m.Login(context.Background(), opts)
+				errCh <- err
+			}()
+
+			select {
+			case err := <-errCh:
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "BASECAMP_NONINTERACTIVE")
+				assert.Contains(t, err.Error(), "--with-token")
+			case <-time.After(5 * time.Second):
+				t.Fatal("Launchpad login waited on a person under BASECAMP_NONINTERACTIVE")
+			}
+			for _, line := range sl.snapshot() {
+				assert.NotContains(t, line, "Paste the callback URL")
+				assert.NotContains(t, line, "Opening browser")
+			}
+		})
+	}
+}
+
 func TestLoginRemoteMode(t *testing.T) {
 	// No protected-resource metadata (404) => Launchpad fallback, pointed
 	// at this server via BASECAMP_LAUNCHPAD_URL.
@@ -1714,4 +1787,100 @@ func TestAuthorizationEndpoint_LaunchpadTokenOverridesStoredBC3(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "https://launchpad.37signals.com/authorization.json", ep,
 		"non-bc_at_ env token must route to launchpad, not stored bc3")
+}
+
+// TestLoginLaunchpadIgnoresLoginHint: the authorization-code flow has no
+// login_hint; the option is acknowledged as ignored, not silently dropped.
+func TestLoginLaunchpadIgnoresLoginHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("BASECAMP_LAUNCHPAD_URL", srv.URL)
+	t.Setenv("BASECAMP_OAUTH_ISSUER", "")
+
+	cfg := &config.Config{BaseURL: srv.URL}
+	m := NewManager(cfg, srv.Client())
+	m.store = newTestStore(t, tmpDir)
+
+	var logs []string
+	_, err := m.Login(context.Background(), LoginOptions{
+		Remote:      true,
+		LoginHint:   "bot@example.com",
+		Logger:      func(msg string) { logs = append(logs, msg) },
+		InputReader: strings.NewReader(""),
+	})
+	require.Error(t, err, "EOF on the paste prompt aborts the login")
+	assert.Contains(t, strings.Join(logs, "\n"), "--login-hint ignored")
+}
+
+// TestLoginLaunchpadVerifyRunsBeforeStore: the authorization-code flow
+// honors the same pre-store hook as the device flow.
+func TestLoginLaunchpadVerifyRunsBeforeStore(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/authorization/token":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"access_token":"remote-tok","token_type":"bearer","refresh_token":"remote-refresh"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("BASECAMP_LAUNCHPAD_URL", srv.URL)
+	t.Setenv("BASECAMP_OAUTH_ISSUER", "")
+
+	cfg := &config.Config{BaseURL: srv.URL}
+	m := NewManager(cfg, srv.Client())
+	m.store = newTestStore(t, tmpDir)
+	credKey := config.NormalizeBaseURL(srv.URL)
+
+	sl := newSyncLogger()
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	var seenToken, seenType string
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := m.Login(context.Background(), LoginOptions{
+			Remote:      true,
+			Logger:      sl.log,
+			InputReader: pr,
+			Verify: func(_ context.Context, token, oauthType string) error {
+				seenToken, seenType = token, oauthType
+				return output.ErrAuth("not you")
+			},
+		})
+		errCh <- err
+	}()
+
+	var authURL string
+	select {
+	case authURL = <-sl.authReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for auth URL to be logged")
+	}
+	u, err := url.Parse(authURL)
+	require.NoError(t, err)
+	_, err = fmt.Fprintf(pw, "http://127.0.0.1:8976/callback?code=test-code&state=%s\n", u.Query().Get("state"))
+	require.NoError(t, err)
+	pw.Close()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not you")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Login timed out")
+	}
+	assert.Equal(t, "remote-tok", seenToken)
+	assert.Equal(t, "launchpad", seenType)
+	_, loadErr := m.store.Load(credKey)
+	assert.Error(t, loadErr, "a rejected token is never stored")
 }

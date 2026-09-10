@@ -697,7 +697,9 @@ func newSetupAgentsCmd() *cobra.Command {
 		Short: "Install the Basecamp skill and connect detected coding agents",
 		Long: "Install the baseline Basecamp agent skill and attempt to connect coding agents.\n\n" +
 			"Use --remove to uninstall Basecamp-managed coding-agent integrations without\n" +
-			"removing authentication, configuration, or Basecamp data.\n\n" +
+			"removing authentication, configuration, or Basecamp data. It leaves the\n" +
+			"37signals marketplace registration in place, since other plugins may use it,\n" +
+			"and uses the codex binary to inspect and remove the Codex plugin.\n\n" +
 			"Selection is controlled by " + agentSetupEnv + ": claude, codex, all, or none. When\n" +
 			"unset, a single detected agent is connected; when several are detected none is\n" +
 			"guessed — the per-agent `basecamp setup <id>` commands are surfaced instead.",

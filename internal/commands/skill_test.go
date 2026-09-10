@@ -801,7 +801,7 @@ func TestRefreshAllInstalledSkillsRejectsSymlinkedSkillDirectory(t *testing.T) {
 	assert.Equal(t, target, linkTarget)
 }
 
-func TestRefreshAllInstalledSkillsRejectsSymlinkedSkillAncestor(t *testing.T) {
+func TestRefreshAllInstalledSkillsFollowsSymlinkedSkillAncestor(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", home)
@@ -813,10 +813,12 @@ func TestRefreshAllInstalledSkillsRejectsSymlinkedSkillAncestor(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(target, ownershipMarkerFile), []byte("managed"), 0o644))
 	require.NoError(t, os.Symlink(externalConfig, filepath.Join(home, ".config")))
 
-	assert.False(t, refreshAllInstalledSkills())
+	assert.True(t, refreshAllInstalledSkills())
 	got, err := os.ReadFile(filepath.Join(target, skillFilename))
 	require.NoError(t, err)
-	assert.Equal(t, "outside", string(got))
+	embedded, err := skills.FS.ReadFile("basecamp/SKILL.md")
+	require.NoError(t, err)
+	assert.Equal(t, embedded, got, "a dotfiles-managed ~/.config must not freeze the skill")
 }
 
 func TestLinkSkillToClaudeUsesResolvedConfigDirectoryForRelativeTarget(t *testing.T) {
@@ -867,33 +869,64 @@ func TestLinkSkillToClaudeAcceptsLegacyTargetWhenAgentsDirectoryIsSymlinked(t *t
 	assert.Equal(t, embedded, data)
 }
 
-func TestInstallSkillFilesRejectsSymlinkedParent(t *testing.T) {
+// A refusal to touch a directory we do not own is local and actionable. It used
+// to reach `skill install --json` as `api_error`, exit 7, which points at the
+// server for a problem the filesystem has.
+func TestUnmanagedSkillDirErrorReportsUsageCode(t *testing.T) {
+	structured := output.AsError(&unmanagedSkillDirError{dir: filepath.Join(t.TempDir(), "basecamp")})
+	assert.Equal(t, output.CodeUsage, structured.Code)
+	assert.NotEqual(t, "api_error", structured.Code)
+	assert.Contains(t, structured.Message, "was not written by basecamp-cli")
+	assert.NotEmpty(t, structured.Hint)
+}
+
+func TestInstallSkillFilesFollowsSymlinkedParent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	external := t.TempDir()
 	require.NoError(t, os.Symlink(external, filepath.Join(home, ".agents")))
 
-	_, err := installSkillFiles()
-	var unmanaged *unmanagedSkillDirError
-	require.ErrorAs(t, err, &unmanaged)
-	_, statErr := os.Lstat(filepath.Join(external, "skills", "basecamp", skillFilename))
-	assert.True(t, os.IsNotExist(statErr))
+	path, err := installSkillFiles()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(home, ".agents", "skills", "basecamp", skillFilename), path)
+	require.FileExists(t, filepath.Join(external, "skills", "basecamp", skillFilename))
+	require.FileExists(t, filepath.Join(external, "skills", "basecamp", ownershipMarkerFile))
 }
 
-func TestClaimPredefinedSkillDirRejectsProjectRelativeSymlinkedParent(t *testing.T) {
+func TestClaimPredefinedSkillDirFollowsProjectRelativeSymlinkedParent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	project := t.TempDir()
 	t.Chdir(project)
 	external := t.TempDir()
 	require.NoError(t, os.Symlink(external, filepath.Join(project, ".opencode")))
 
+	created, err := claimPredefinedSkillDirForWrite(filepath.Join(".opencode", "skills", "basecamp"))
+	require.NoError(t, err)
+	assert.True(t, created)
+	require.DirExists(t, filepath.Join(external, "skills", "basecamp"))
+}
+
+func TestClaimPredefinedSkillDirRejectsUnownedLeafBehindSymlinkedParent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	project := t.TempDir()
+	t.Chdir(project)
+	external := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(external, "skills", "basecamp"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(external, "skills", "basecamp", skillFilename), []byte("mine"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(external, "skills", "basecamp", "notes.txt"), []byte("mine"), 0o644))
+	require.NoError(t, os.Symlink(external, filepath.Join(project, ".opencode")))
+
 	_, err := claimPredefinedSkillDirForWrite(filepath.Join(".opencode", "skills", "basecamp"))
 	var unmanaged *unmanagedSkillDirError
 	require.ErrorAs(t, err, &unmanaged)
-	_, statErr := os.Lstat(filepath.Join(external, "skills", "basecamp"))
-	assert.True(t, os.IsNotExist(statErr))
+	data, readErr := os.ReadFile(filepath.Join(external, "skills", "basecamp", skillFilename))
+	require.NoError(t, readErr)
+	assert.Equal(t, "mine", string(data))
 }
 
-func TestLinkSkillToClaudeRejectsSymlinkedSkillsParent(t *testing.T) {
+func TestLinkSkillToClaudeFollowsSymlinkedSkillsParent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	_, err := installSkillFiles()
@@ -902,11 +935,14 @@ func TestLinkSkillToClaudeRejectsSymlinkedSkillsParent(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(home, ".claude"), 0o755))
 	require.NoError(t, os.Symlink(external, filepath.Join(home, ".claude", "skills")))
 
-	_, _, err = linkSkillToClaude()
-	var unmanaged *unmanagedSkillDirError
-	require.ErrorAs(t, err, &unmanaged)
-	_, statErr := os.Lstat(filepath.Join(external, "basecamp"))
-	assert.True(t, os.IsNotExist(statErr))
+	link, _, err := linkSkillToClaude()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(home, ".claude", "skills", "basecamp"), link)
+	embedded, err := skills.FS.ReadFile("basecamp/SKILL.md")
+	require.NoError(t, err)
+	data, err := os.ReadFile(filepath.Join(external, "basecamp", skillFilename))
+	require.NoError(t, err)
+	assert.Equal(t, embedded, data)
 }
 
 func TestLinkSkillToClaudeRejectsSymlinkedBaselineDirectory(t *testing.T) {

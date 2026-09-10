@@ -4,7 +4,7 @@ description: |
   Interact with Basecamp via the Basecamp CLI. Full API coverage: projects, todos, cards,
   messages, files, schedule, check-ins, timeline, recordings, templates, webhooks,
   subscriptions, lineup, chat, pings, gauges, assignments, notifications, bookmarks,
-  drafts, notes, calendars, and accounts.
+  bubble-up, drafts, notes, calendars, and accounts.
   Use for ANY Basecamp question or action.
 triggers:
   # Direct invocations
@@ -20,6 +20,7 @@ triggers:
   - basecamp file
   - basecamp document
   - basecamp bookmarks
+  - basecamp bubble-up
   - basecamp drafts
   - basecamp notes
   - basecamp calendars
@@ -80,7 +81,7 @@ argument-hint: "[action] [args...]"
 
 # /basecamp - Basecamp Workflow Command
 
-Full CLI coverage: 155 endpoints across todos, cards, messages, files, schedule, check-ins, timeline, recordings, templates, webhooks, subscriptions, lineup, chat, pings, gauges, assignments, notifications, and accounts.
+Full CLI coverage: 189 tracked in-scope endpoints across todos, cards, messages, files, schedule, check-ins, timeline, recordings, templates, webhooks, subscriptions, lineup, chat, pings, gauges, assignments, notifications, and accounts.
 
 ## Agent Invariants
 
@@ -90,12 +91,13 @@ Full CLI coverage: 155 endpoints across todos, cards, messages, files, schedule,
 2. **Parse URLs first** with `basecamp url parse "<url>"` to extract IDs
 3. **Comments are flat** - reply to parent recording, not to comments
 4. **Check context** via `.basecamp/config.json` before assuming project
-5. **Content fields accept Markdown and @mentions** — message body and comment content accept Markdown syntax; the CLI converts to HTML automatically. Use Markdown formatting (lists, bold, links, code blocks, tables) for rich content. Four mention syntaxes are available (prefer deterministic for agents):
+5. **Content fields accept Markdown, and most accept @mentions** — the CLI converts these rich-text fields from Markdown to HTML: message bodies, document bodies, comment content, todo descriptions, card bodies, schedule entry descriptions, upload descriptions, check-in answers and notes. Two rich-text fields are sent as written, so give them HTML: todolist descriptions and gauge needle descriptions. Chat is different again: `chat post` sends plain text unless you pass `--content-type text/html` or the line carries a mention. Use Markdown formatting (lists, bold, links, code blocks, tables) for rich content. @mentions resolve in message bodies, comment content, card bodies, schedule descriptions and chat lines — not in todo descriptions, documents, uploads, check-ins or notes. Four mention syntaxes are available (prefer deterministic for agents):
    - **`[@Name](mention:SGID)`** — zero API calls, embeds SGID directly (preferred for agents)
    - **`[@Name](person:ID)`** — one API call, resolves person ID to SGID via pingable set
    - **`@sgid:VALUE`** — inline SGID embed for pipeline composability
    - **`@Name` / `@First.Last`** — fuzzy name resolution (may be ambiguous)
-   For todos, documents, and cards, content is sent as-is — use plain text or HTML directly.
+
+   Raw HTML is also accepted, but it is all-or-nothing per field: a tag the CLI detects as HTML (`<p>`, `<ul>`, `<strong>`, `<a>`, `<img>`, `<table>` and the other common formatting tags) outside a backtick code span or backtick fence (a `~~~` fence does not hide it) skips Markdown conversion for the whole field, so any Markdown alongside it — `![alt](/local/path)` included — is sent literally. The HTML itself goes through as written, except that an empty separator paragraph is inserted between directly adjacent `<p>` blocks so they render with spacing; a local path in a raw `<img src>` is still uploaded and replaced with an attachment in every converted field except notes, which take no attachments. Titles (a todo's content argument, card and message titles) are plain text and never converted.
 
    **Table boundary:** GFM tables round-trip: they render in message/comment
    bodies, display converts them back to pipe tables, and the TUI in-place
@@ -134,6 +136,13 @@ Full CLI coverage: 155 endpoints across todos, cards, messages, files, schedule,
      or `--edit` where offered.
    - Trailing newlines are trimmed from stdin content, so `printf 'x\n' | ... -`
      posts `x` (this keeps `boost create -` inside its 16-rune limit).
+  - Universal `-` support (and the stray-`-` guard) shipped in **v0.10.0**. Older
+    CLIs do not support it consistently: `comments create/update` read stdin,
+    while unsupported inputs may treat `-` as literal content or fail. For
+    example, `messages create "Title" -` posts a body of `-`, which Markdown
+    renders as an empty bullet list. When the CLI version is unknown, check
+    `basecamp --version` first, or pass the content portably as
+    `"$(cat file.md)"` and verify the posted `content` when it matters.
 6. **Project scope is mandatory for most commands** — via `--in <project>` or `.basecamp/config.json`. Cross-project exceptions: `basecamp reports assigned` for assigned work, `basecamp assignments` for structured assignment views, `basecamp reports overdue` for overdue todos, `basecamp reports schedule` for upcoming schedule across all projects, `basecamp recordings <type>` for browsing by type, `basecamp notifications` for notifications, `basecamp gauges list` for account-wide gauges, and the seven list commands covered in item 7.
 7. **Account-wide listing.** `basecamp todos list --all-projects --json` lists across every project; the same flag does the same on `cards list`, `messages list`, `comments list`, `files list`, `forwards list`, and `checkins answers`. It overrides a configured project, and with no project in scope those commands already list account-wide rather than prompting. Flags that name something inside a single project are rejected there rather than silently ignored.
    Account-wide listings return **the first 100 items by default** — account-wide "all" is the whole account, not one project's worth. Use `--limit N` to raise the cap (it walks pages until N are collected) or `--all` for everything. `--page N` fetches exactly one page, but only on the paginated listings.
@@ -215,6 +224,9 @@ basecamp <cmd> --page 1     # First page only, no auto-pagination
 | My bookmarks | `basecamp bookmarks list --json` |
 | Bookmark something | `basecamp bookmarks add <id-or-url> --json` |
 | Is it bookmarked? | `basecamp bookmarks check <id-or-url> --json` (always exits 0) |
+| Bubble a recording up | `basecamp bubble-up add <id-or-url> --json` |
+| Schedule a bubble-up | `basecamp bubble-up add <id-or-url> --at tomorrow --json` |
+| Pop a bubble-up | `basecamp bubble-up remove <id-or-url> --json` |
 | My unpublished drafts | `basecamp drafts list --json` |
 | Read my personal note | `basecamp notes show --json` |
 | Replace my personal note | `basecamp notes set "<content>" --json` |
@@ -958,16 +970,30 @@ basecamp recordings visibility <id> --hidden      # Hide from clients
 ### Templates
 
 ```bash
-basecamp templates --json                         # List templates
-basecamp templates show <id> --json               # Template details
-basecamp templates create "Template Name"         # Create empty template
+basecamp templates list --json                    # List project templates
+basecamp templates show <id> --json               # Project template details
+basecamp templates create "Template Name"         # Create empty project template
 basecamp templates update <id> --name "New Name"
-basecamp templates delete <id>                    # Trash template
+basecamp templates delete <id>                    # Trash project template
 basecamp templates construct <id> --name "New Project"  # Create project (async)
-basecamp templates construction <template_id> <construction_id>  # Check status
+basecamp templates construct <id> --name "New Project" --start-date 2026-09-01  # Anchor template dates to that week
+basecamp templates construction <template_id> <construction_id>  # Check project status
+
+basecamp templates library --json                 # List active to-do list templates
+basecamp templates copy <template_id> --in <project>  # Start copying into To-dos
+basecamp templates copy-status <copy_id>          # Check copy status
 ```
 
-**Construct returns construction_id - poll until status="completed" to get project.**
+**Asynchronous results:** `construct` returns a construction ID; poll `construction`
+until `status="completed"` to get the project. A template's dates are relative to its
+first week, and template weeks start on Sunday: `--start-date` (YYYY-MM-DD or natural,
+e.g. `next monday`) anchors them to the Sunday on or before that date; without it they
+anchor to the week of construction. `copy` returns a copy ID; poll
+`copy-status` through `pending` and `processing` until it is `completed` or `failed`.
+
+A copy can report the people who need access to the destination project. Show those
+people to the user and rerun with `--confirm-adding-people` only after the user
+explicitly approves granting that access. Never add this flag automatically.
 
 ### Webhooks
 
@@ -1084,7 +1110,7 @@ success while changing nothing. If two steps on one card are prioritized, the
 listing shows the card once with a single `priority_recording_id` and the
 siblings are not separately addressable.
 
-### Personal (bookmarks, drafts, notes)
+### Personal (bookmarks, bubble-up, drafts, notes)
 
 Private to you, spanning every project — no `--in <project>`.
 
@@ -1093,10 +1119,20 @@ basecamp bookmarks list --json
 basecamp bookmarks add <id-or-url> --json
 basecamp bookmarks remove <id-or-url> --json
 basecamp bookmarks check <id-or-url> --json
+basecamp bubble-up add <id-or-url> --json
+basecamp bubble-up add <id-or-url> --at tomorrow --json
+basecamp bubble-up remove <id-or-url> --json
 basecamp drafts list --json
 basecamp notes show --json
 basecamp notes set "<content>" --json
 ```
+
+`bubble-up add`/`remove` resurface a recording in your readings (the BC5
+successor to "save"), addressed by id or pasted URL. `add` bubbles up now by
+default; `--at` schedules it — a keyword (`today`, `tomorrow`, `weekend`,
+`next_week`) or a calendar date (`YYYY-MM-DD`). Both verbs are idempotent. There is no
+per-recording status read (that GET is an unrenderable API gap); the full list
+is `basecamp notifications bubbleups`.
 
 `bookmarks add` and `remove` are idempotent — re-adding returns the existing
 bookmark, removing an absent one still succeeds. `check` reports
@@ -1204,9 +1240,46 @@ basecamp people list --json                          # All people in account
 basecamp people list --project <project> --json    # People on project
 basecamp me --json                                 # Current user
 basecamp people show <id> --json                   # Person details
-basecamp people add <id> --project <project>       # Add to project
-basecamp people remove <id> --project <project>    # Remove from project
+basecamp people show me --json                     # Your own profile
+basecamp people update me --bio "..." --title "..." --json   # Edit your own profile
+basecamp people out-of-office me --json            # Your out-of-office status
+basecamp people out-of-office me --start 2026-09-14 --end 2026-09-18 --json  # Set out-of-office
+basecamp people out-of-office me --clear --json    # Clear out-of-office
+basecamp people add <id> --project <project>       # Add a team member to a project
+basecamp people remove <id> --project <project>    # Remove a team member from a project
 ```
+
+`people update me` edits your own profile (bio, title, name, email, location,
+time zone); pass a flag with an empty value to clear that field. `people
+out-of-office me` shows your away status, sets it with `--start`/`--end`
+(natural language or YYYY-MM-DD, end not before start), or clears it with
+`--clear`.
+
+`people list` reports each person's `client` flag. `people add`/`remove` manage
+team members only — a client's id passed to them is dropped server-side, never
+cross-graded — so clients have their own verbs:
+
+```bash
+basecamp people clients enable --in <project>                 # Turn client access on (do this first)
+basecamp people clients list --in <project>                   # Clients on the project
+basecamp people clients add <id|email|name> --in <project>    # Grant an existing client user
+basecamp people clients invite annie@example.com --in <project>                 # Invite a new client by email
+basecamp people clients invite "Annie Bryan <annie@example.com>" --in <project> # ... with a name
+basecamp people clients invite - --in <project>               # One invitee per line on stdin
+basecamp people clients remove <id|email|name> --in <project> # Revoke a client's access
+basecamp people clients disable --in <project>                # Turn client access off (after removing every client)
+```
+
+Enabling clients is a deliberate, separate step: it applies the project's
+default client visibility (timeline and most tools shared; card table,
+Campfire, and Doors private), so `add`/`invite` never enable implicitly and
+answer `forbidden` with an `enable` hint while clients are off. `invite` takes
+`--company` (applies to every invitee) and `--title` (one invitee only), and is
+all-or-nothing: a token that is not an address is refused locally as `usage`
+(2) naming each one, an address the server rejects exits `validation` (9)
+naming each rejected row, and a seat shortfall exits `limit_exceeded` (10) — in
+every case nobody was invited. `add`/`remove` report the ids the server did not grant or revoke
+(already on the project, or not a client user) in the notice.
 
 ### Search
 
@@ -1321,6 +1394,10 @@ basecamp auth login                               # Re-authenticate
 basecamp auth login --scope full                  # Full access (the default; ignored by Launchpad)
 basecamp auth login --scope read                  # Read-only access (ignored by Launchpad)
 basecamp auth login --device-code                 # Headless authentication with manual browser instructions
+BASECAMP_NONINTERACTIVE=1 basecamp auth login --device-code  # The only OAuth login that runs under BASECAMP_NONINTERACTIVE, and only where the server offers the device flow (Launchpad does not); browser and pasted-callback flows refuse — prefer --with-token
+basecamp auth login --with-token -P bot --account <id>  # Import a personal access token from stdin (pipe it in)
+basecamp auth login --expect-identity <id>        # Discard the login unless it authenticated as this identity
+basecamp profile create <name> --account <id> --expect-identity <id>  # Same assertion for a new profile
 ```
 
 **Network errors / localhost URLs:**

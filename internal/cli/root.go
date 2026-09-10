@@ -112,7 +112,8 @@ func NewRootCmd() *cobra.Command {
 			}
 
 			// Resolve profile
-			profileName, err := resolveProfile(cfg, flags)
+			mayCreate := cmd.Annotations[commands.AnnotationProfileMayCreate] != ""
+			profileName, err := resolveProfile(cfg, flags, mayCreate)
 			if err != nil {
 				if bareRoot {
 					initBareRootApp(cfg)
@@ -120,7 +121,14 @@ func NewRootCmd() *cobra.Command {
 				}
 				return err
 			}
-			if profileName != "" {
+			_, profileKnown := cfg.Profiles[profileName]
+			if profileName != "" && !profileKnown {
+				// A may-create command named a profile that does not exist
+				// yet: it becomes the active credential key with the
+				// top-level configuration, and the command registers it.
+				cfg.ActiveProfile = profileName
+			}
+			if profileKnown {
 				if err := cfg.ApplyProfile(profileName); err != nil {
 					return err
 				}
@@ -138,10 +146,12 @@ func NewRootCmd() *cobra.Command {
 					Todolist: flags.Todolist,
 					CacheDir: flags.CacheDir,
 				})
-				// Profile-scoped cache (only if cache dir was not explicitly set via flag or env)
-				if flags.CacheDir == "" && os.Getenv("BASECAMP_CACHE_DIR") == "" {
-					cfg.CacheDir = filepath.Join(cfg.CacheDir, "profiles", profileName)
-				}
+			}
+			// Profile-scoped cache (only if cache dir was not explicitly set
+			// via flag or env). A not-yet-registered name is unvalidated
+			// input, so it does not become a path component.
+			if profileKnown && flags.CacheDir == "" && os.Getenv("BASECAMP_CACHE_DIR") == "" {
+				cfg.CacheDir = filepath.Join(cfg.CacheDir, "profiles", profileName)
 			}
 
 			// Enforce HTTPS for non-localhost base_url.
@@ -355,6 +365,7 @@ func Execute() {
 	cmd.AddCommand(commands.NewGaugesCmd())
 	cmd.AddCommand(commands.NewAssignmentsCmd())
 	cmd.AddCommand(commands.NewBookmarksCmd())
+	cmd.AddCommand(commands.NewBubbleUpCmd())
 	cmd.AddCommand(commands.NewDraftsCmd())
 	cmd.AddCommand(commands.NewNotesCmd())
 	cmd.AddCommand(commands.NewCalendarsCmd())
@@ -373,8 +384,19 @@ func Execute() {
 	// Use ExecuteC to get the executed command (for correct context access)
 	executedCmd, err := cmd.ExecuteC()
 
-	// Bare group command with explicit flags (e.g. "cards --in X"): the help
-	// function suppressed output. Convert to a usage error.
+	// Bare group command with a positional that matches no subcommand
+	// (e.g. "cards 12345", or "cards 12345 --in X"): Cobra stops at the group
+	// and renders help with a zero exit — so an agent that meant "cards show
+	// 12345" reads success while nothing ran. The help function suppressed the
+	// output; convert it to a usage error that names the mistake and points at
+	// the canonical path. This is checked before the bare-flags case so a
+	// scoped invocation keeps the specific hint rather than the generic one.
+	if err == nil && executedCmd != cmd && isBareGroupWithUnknownArg(executedCmd) {
+		err = unknownSubcommandError(executedCmd, executedCmd.Flags().Args()[0])
+	}
+
+	// Bare group command with explicit flags but no positional (e.g. "cards
+	// --in X"): the help function suppressed output. Convert to a usage error.
 	if err == nil && executedCmd != cmd && isBareGroupWithFlags(executedCmd) {
 		err = output.ErrUsageHint(
 			"subcommand required",
@@ -545,27 +567,31 @@ func jqRenderErrorDiagnostic(err error) string {
 // 4. Single profile → auto-use
 // 5. Multiple profiles → interactive picker (if TTY)
 // 6. No profiles → empty string (use top-level config values)
-func resolveProfile(cfg *config.Config, flags appctx.GlobalFlags) (string, error) {
+//
+// An explicitly named profile (1, 2) must exist unless mayCreate: a command
+// annotated AnnotationProfileMayCreate registers the profile itself, so the
+// name passes through for it to act on.
+func resolveProfile(cfg *config.Config, flags appctx.GlobalFlags, mayCreate bool) (string, error) {
 	// 1. --profile flag
 	if flags.Profile != "" {
+		if _, ok := cfg.Profiles[flags.Profile]; ok || mayCreate {
+			return flags.Profile, nil
+		}
 		if len(cfg.Profiles) == 0 {
 			return "", fmt.Errorf("profile %q specified via --profile but no profiles are configured; create one with: basecamp profile create", flags.Profile)
 		}
-		if _, ok := cfg.Profiles[flags.Profile]; !ok {
-			return "", fmt.Errorf("unknown profile %q (available: %s)", flags.Profile, profileNames(cfg))
-		}
-		return flags.Profile, nil
+		return "", fmt.Errorf("unknown profile %q (available: %s)", flags.Profile, profileNames(cfg))
 	}
 
 	// 2. BASECAMP_PROFILE env var
 	if profile := os.Getenv("BASECAMP_PROFILE"); profile != "" {
+		if _, ok := cfg.Profiles[profile]; ok || mayCreate {
+			return profile, nil
+		}
 		if len(cfg.Profiles) == 0 {
 			return "", fmt.Errorf("profile %q specified via BASECAMP_PROFILE but no profiles are configured; create one with: basecamp profile create", profile)
 		}
-		if _, ok := cfg.Profiles[profile]; !ok {
-			return "", fmt.Errorf("unknown profile %q from BASECAMP_PROFILE (available: %s)", profile, profileNames(cfg))
-		}
-		return profile, nil
+		return "", fmt.Errorf("unknown profile %q from BASECAMP_PROFILE (available: %s)", profile, profileNames(cfg))
 	}
 
 	// No profiles configured - use top-level config
@@ -669,6 +695,75 @@ func promptForProfile(cfg *config.Config) (string, error) {
 func isConfigCmd(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
 		if c.Name() == "config" {
+			return true
+		}
+	}
+	return false
+}
+
+// unknownSubcommandError builds a usage error for a group command handed a
+// positional that matches no subcommand. A bare numeric positional almost
+// always means the caller wanted "<group> show <id>", so when the group's show
+// subcommand actually accepts an id the hint spells that path out; otherwise it
+// offers cobra's spelling suggestions, falling back to help.
+func unknownSubcommandError(cmd *cobra.Command, arg string) error {
+	msg := fmt.Sprintf("unknown command %q for %q", arg, cmd.CommandPath())
+
+	if isAllDigits(arg) && showAcceptsID(cmd) {
+		return output.ErrUsageHint(msg, fmt.Sprintf("Did you mean %q?", cmd.CommandPath()+" show "+arg))
+	}
+	// Only the root sets SuggestionsMinimumDistance; a group left at zero would
+	// match nothing but an exact prefix, so borrow the root's threshold.
+	if cmd.SuggestionsMinimumDistance <= 0 {
+		cmd.SuggestionsMinimumDistance = cmd.Root().SuggestionsMinimumDistance
+	}
+	if suggestions := cmd.SuggestionsFor(arg); len(suggestions) > 0 {
+		return output.ErrUsageHint(msg, "Did you mean: "+strings.Join(suggestions, ", ")+"?")
+	}
+	return output.ErrUsageHint(msg, "Run: "+cmd.CommandPath()+" --help")
+}
+
+// isAllDigits reports whether s is a non-empty run of ASCII digits.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// showAcceptsID reports whether cmd has a show action that takes an identifier
+// positional. A singleton "show" (accounts, config, hillcharts) takes no id, so
+// suggesting "<group> show <id>" there would send the caller to a command that
+// silently ignores the number. The action is matched by name or alias, so a
+// command like chat's "line" that exposes "show" as an alias still counts.
+func showAcceptsID(cmd *cobra.Command) bool {
+	for _, sub := range cmd.Commands() {
+		if !commandMatches(sub, "show") {
+			continue
+		}
+		for _, a := range ParseArgs(sub) {
+			if a.Kind == "identifier" {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// commandMatches reports whether name is cmd's primary name or one of its
+// aliases.
+func commandMatches(cmd *cobra.Command, name string) bool {
+	if cmd.Name() == name {
+		return true
+	}
+	for _, alias := range cmd.Aliases {
+		if alias == name {
 			return true
 		}
 	}

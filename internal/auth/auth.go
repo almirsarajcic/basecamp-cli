@@ -55,6 +55,17 @@ const (
 	scopeFull = "full"
 )
 
+// CredentialSourceToken marks a credential imported from a personal access
+// token rather than obtained through an OAuth flow.
+const CredentialSourceToken = "token"
+
+// RefreshWindow is how long before its expiry a stored access token stops
+// being served as-is: AccessToken refreshes inside this window, and a
+// credential with nothing to refresh with (an imported token) is refused
+// there instead. Exported so an import can decline a token that would be
+// unusable from its first command.
+const RefreshWindow = 5 * time.Minute
+
 // Default OAuth callback address and redirect URI.
 const (
 	defaultCallbackAddr = "127.0.0.1:8976"
@@ -137,7 +148,7 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	// Check if token is expired (with 5 minute buffer).
 	// ExpiresAt==0 means non-expiring token (e.g., from BASECAMP_TOKEN env var),
 	// so only refresh if ExpiresAt > 0 and is within the expiry window.
-	if creds.ExpiresAt > 0 && time.Now().Unix() >= creds.ExpiresAt-300 {
+	if creds.ExpiresAt > 0 && time.Now().Unix() >= creds.ExpiresAt-int64(RefreshWindow.Seconds()) {
 		if err := m.refreshLocked(ctx, credKey, creds); err != nil {
 			return "", err
 		}
@@ -168,8 +179,8 @@ func (m *Manager) StoredAccessToken(ctx context.Context) (string, error) {
 		return "", output.ErrAuth(fmt.Sprintf("No stored credentials for %s: %v", credKey, err))
 	}
 
-	// Check if token is expired (with 5 minute buffer)
-	if creds.ExpiresAt > 0 && time.Now().Unix() >= creds.ExpiresAt-300 {
+	// Check if token is expired (with the refresh-window buffer)
+	if creds.ExpiresAt > 0 && time.Now().Unix() >= creds.ExpiresAt-int64(RefreshWindow.Seconds()) {
 		if err := m.refreshLocked(ctx, credKey, creds); err != nil {
 			// Preserve the original error type (API, network, etc.)
 			return "", err
@@ -345,6 +356,19 @@ type LoginOptions struct {
 	// Mutually exclusive with Remote.
 	Local bool
 
+	// LoginHint names the account (email address) the user should sign in
+	// as. The device flow sends it as Basecamp's login_hint extension to the
+	// device authorization request, where it steers the sign-in page and
+	// never authenticates on its own; Launchpad's authorization-code flow
+	// ignores it.
+	LoginHint string
+
+	// Verify, when set, is called with the freshly issued access token and
+	// its provider type ("bc5" or "launchpad") before anything is stored. A
+	// non-nil error aborts the login and nothing is written: the credential
+	// is proven first and persisted second.
+	Verify func(ctx context.Context, accessToken, oauthType string) error
+
 	// InputReader is the source for pasted callback URLs in remote mode.
 	// If nil, os.Stdin is used.
 	InputReader io.Reader
@@ -375,7 +399,7 @@ func (o *LoginOptions) defaults() {
 	if !o.Remote && !o.Local && hostutil.IsRemoteSession() {
 		o.Remote = true
 	}
-	if o.Remote {
+	if o.Remote || config.NonInteractiveEnv() {
 		o.NoBrowser = true
 	}
 	if o.BrowserLauncher == nil && !o.NoBrowser {
@@ -463,6 +487,17 @@ func (m *Manager) Login(ctx context.Context, opts LoginOptions) (*LoginResult, e
 // browser (or printed) auth URL, then a loopback callback or pasted
 // callback URL in remote mode.
 func (m *Manager) loginLaunchpad(ctx context.Context, credKey string, oauthCfg *oauth.Config, opts *LoginOptions) (*LoginResult, error) {
+	// Both Launchpad shapes wait on a person: the loopback callback on a
+	// browser someone signs into, the remote one on a pasted redirect URL.
+	// Every login entry point converges here, so this is where the
+	// environment's word that nobody is at the terminal is final.
+	if config.NonInteractiveEnv() {
+		return nil, output.ErrUsageHint("Interactive login cannot run under BASECAMP_NONINTERACTIVE",
+			"This authorization server signs in through the browser — a loopback callback, or a pasted redirect URL in remote mode — and does not offer the device flow. "+
+				"Unset BASECAMP_NONINTERACTIVE to sign in, or import a token headlessly: "+
+				"`... | basecamp auth login --with-token -P <profile> --account <id>`.")
+	}
+
 	// Resolve redirect URI and listener address
 	redirectURI, listenAddr, err := resolveOAuthCallback(opts)
 	if err != nil {
@@ -477,6 +512,9 @@ func (m *Manager) loginLaunchpad(ctx context.Context, credKey string, oauthCfg *
 
 	if opts.Scope != "" {
 		opts.log("Launchpad does not support OAuth scopes; --scope ignored")
+	}
+	if opts.LoginHint != "" {
+		opts.log("Launchpad does not support login hints; --login-hint ignored")
 	}
 
 	clientCreds, err := launchpadClientCredentials(opts.log)
@@ -572,6 +610,11 @@ func (m *Manager) loginLaunchpad(ctx context.Context, credKey string, oauthCfg *
 	creds.TokenEndpoint = oauthCfg.TokenEndpoint
 	creds.Scope = ""
 
+	if opts.Verify != nil {
+		if err := opts.Verify(ctx, creds.AccessToken, oauthTypeLaunchpad); err != nil {
+			return nil, err
+		}
+	}
 	if err := m.store.Save(credKey, creds); err != nil {
 		return nil, err
 	}
@@ -616,11 +659,14 @@ func (m *Manager) loginDevice(ctx context.Context, credKey string, oauthCfg *oau
 	if err != nil {
 		return nil, err
 	}
-	devOpts := make([]oauth.DeviceOption, 0, 2+len(opts.deviceOptions))
+	devOpts := make([]oauth.DeviceOption, 0, 3+len(opts.deviceOptions))
 	devOpts = append(devOpts,
 		oauth.WithDeviceHTTPClient(deviceClient),
 		oauth.WithDeviceScope(requestedScope),
 	)
+	if opts.LoginHint != "" {
+		devOpts = append(devOpts, oauth.WithDeviceLoginHint(opts.LoginHint))
+	}
 	devOpts = append(devOpts, opts.deviceOptions...)
 
 	// The SDK display hook can't return an error, and the SDK proceeds into
@@ -709,6 +755,11 @@ func (m *Manager) loginDevice(ctx context.Context, credKey string, oauthCfg *oau
 		creds.ExpiresAt = token.ExpiresAt.Unix()
 	}
 
+	if opts.Verify != nil {
+		if err := opts.Verify(ctx, creds.AccessToken, oauthTypeBC5); err != nil {
+			return nil, err
+		}
+	}
 	if err := m.store.Save(credKey, creds); err != nil {
 		return nil, err
 	}
@@ -730,6 +781,35 @@ func validVerificationURL(raw string) string {
 	return raw
 }
 
+// ImportToken stores an externally issued BC5 access token (a personal
+// access token) as the current credential, in one write, together with the
+// identity it was verified to authenticate as and the expiry the server
+// reported for it (zero when it reported none). The token has no refresh
+// token and no token endpoint: a zero expiry is the non-expiring path
+// AccessToken already takes, and a reported one makes AccessToken refuse
+// the token near expiry with "No refresh token available" rather than
+// letting requests start failing — either way the remedy is to import
+// again. Scope is what the token was verified or declared to carry.
+func (m *Manager) ImportToken(token, scope, userID, userEmail string, expiresAt time.Time) error {
+	if scope != scopeRead && scope != scopeFull {
+		return output.ErrUsage("Invalid scope. Use 'read' or 'full'")
+	}
+	creds := &Credentials{
+		AccessToken: token,
+		OAuthType:   oauthTypeBC5,
+		Scope:       scope,
+		UserID:      userID,
+		UserEmail:   userEmail,
+		Source:      CredentialSourceToken,
+	}
+	if !expiresAt.IsZero() {
+		creds.ExpiresAt = expiresAt.Unix()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.store.Save(m.credentialKey(), creds)
+}
+
 // Logout removes stored credentials.
 func (m *Manager) Logout() error {
 	credKey := m.credentialKey()
@@ -749,6 +829,10 @@ type discovery struct {
 // outcomes fall back to Launchpad; once a BC5 issuer is selected, every
 // failure is returned loudly — never converted into a Launchpad attempt.
 func (m *Manager) discoverOAuth(ctx context.Context, log func(string)) (*discovery, error) {
+	if issuer := os.Getenv(oauthIssuerEnv); issuer != "" {
+		return pinnedIssuerDiscovery(issuer, log)
+	}
+
 	origin, err := resourceOrigin(m.cfg.BaseURL)
 	if err != nil {
 		return nil, err
@@ -793,6 +877,42 @@ func (m *Manager) discoverOAuth(ctx context.Context, log func(string)) (*discove
 
 	log(fmt.Sprintf("Authenticating via %s (device flow)", res.Issuer))
 	return &discovery{config: res.Config, oauthType: oauthTypeBC5, issuer: res.Issuer}, nil
+}
+
+// oauthIssuerEnv pins the BC5 authorization server, bypassing discovery.
+//
+// It exists for the production dark pilot: a server whose OAuth surface is
+// dark answers discovery with 404 while still serving piloted clients, so the
+// only way to reach it is to name it. It is not a configuration surface and
+// is removed once the server advertises itself.
+const oauthIssuerEnv = "BASECAMP_OAUTH_ISSUER"
+
+// pinnedIssuerDiscovery builds the BC5 device-flow config from a pinned
+// issuer origin, deriving the endpoints Basecamp mounts under /oauth. The
+// issuer is operator-supplied environment, so it passes the same endpoint
+// checks a discovery document would, and the derived endpoints are checked
+// again by loginDevice before any POST. A rejected value is never echoed
+// (like a base URL, it can carry userinfo or a query string); the accepted
+// one is announced, reduced to one line, so the operator sees what was
+// pinned — as the discovered issuer is.
+func pinnedIssuerDiscovery(issuer string, log func(string)) (*discovery, error) {
+	issuer = strings.TrimRight(strings.TrimSpace(issuer), "/")
+	u, err := url.Parse(issuer)
+	// The delimiters are checked on the raw value: url.Parse reports an
+	// empty query or fragment ("https://as.example#") as absent, while the
+	// endpoints derived by concatenation below would carry it.
+	if err != nil || u.Opaque != "" || !isSecureEndpointURL(u) || u.Path != "" || strings.ContainsAny(issuer, "?#") {
+		return nil, output.ErrAuth("invalid " + oauthIssuerEnv + ": must be an origin — an absolute https URL (or http on loopback) with a hostname and no path, userinfo, query, or fragment")
+	}
+	deviceEndpoint := issuer + "/oauth/device_authorizations"
+	cfg := &oauth.Config{
+		Issuer:                      issuer,
+		TokenEndpoint:               issuer + "/oauth/tokens",
+		DeviceAuthorizationEndpoint: &deviceEndpoint,
+		GrantTypesSupported:         []string{oauth.DeviceCodeGrantType, "refresh_token"},
+	}
+	log(fmt.Sprintf("Authenticating via %s (device flow, pinned by %s)", richtext.SanitizeSingleLine(issuer), oauthIssuerEnv))
+	return &discovery{config: cfg, oauthType: oauthTypeBC5, issuer: issuer}, nil
 }
 
 // resourceOrigin reduces the configured base URL to a bare scheme://host[:port]
@@ -1131,7 +1251,12 @@ func (m *Manager) AuthorizationEndpoint(ctx context.Context) (string, error) {
 		return strings.TrimSuffix(lpURL, "/") + "/authorization.json", nil
 	}
 
-	oauthType := m.GetOAuthType()
+	return m.AuthorizationEndpointFor(m.GetOAuthType())
+}
+
+// AuthorizationEndpointFor returns the authorization info endpoint for a
+// credential of the given OAuth type, whether or not it is stored yet.
+func (m *Manager) AuthorizationEndpointFor(oauthType string) (string, error) {
 	switch oauthType {
 	case "bc3", oauthTypeBC5:
 		// resourceOrigin, not NormalizeBaseURL: the latter only trims a

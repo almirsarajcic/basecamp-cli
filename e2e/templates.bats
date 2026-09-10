@@ -109,6 +109,15 @@ load test_helper
   assert_output_contains "name required"
 }
 
+@test "templates construct with malformed start date shows error" {
+  create_credentials
+  create_global_config '{"account_id": 99999}'
+
+  run basecamp templates construct 123 --name "Project" --start-date someday
+  assert_failure
+  assert_output_contains "Invalid start date"
+}
+
 
 # Construction status errors
 
@@ -128,6 +137,33 @@ load test_helper
   run basecamp templates construction 123
   # Cobra returns "accepts 2 arg(s)" error
   assert_failure
+}
+
+
+# Template library copy errors
+
+@test "templates copy without template id shows error" {
+  create_credentials
+  create_global_config '{"account_id": 99999}'
+
+  run basecamp templates copy
+  assert_failure
+  assert_output_contains "ID required"
+}
+
+@test "templates copy-status without copy id shows error" {
+  create_credentials
+  create_global_config '{"account_id": 99999}'
+
+  run basecamp templates copy-status
+  assert_failure
+  assert_output_contains "ID required"
+}
+
+@test "templates copy --confirm-adding-people is accepted" {
+  run basecamp templates copy --help
+  assert_success
+  assert_output_contains "--confirm-adding-people"
 }
 
 
@@ -163,6 +199,8 @@ load test_helper
   assert_output_contains "basecamp templates"
   assert_output_contains "construct"
   assert_output_contains "construction"
+  assert_output_contains "library"
+  assert_output_contains "copy-status"
 }
 
 

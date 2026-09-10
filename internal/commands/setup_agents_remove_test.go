@@ -160,7 +160,7 @@ func TestSetupAgentsRemoveDoesNotDeduplicateOpenCodeSymlinkDestination(t *testin
 	require.NoError(t, os.Symlink(projectSkill, globalSkill))
 
 	_, err := runSetupAgentsRemove(t)
-	require.ErrorContains(t, err, "OpenCode (Global) skill: unsafe symlink traversal skipped")
+	require.NoError(t, err)
 	_, statErr := os.Lstat(filepath.Join(projectSkill, skillFilename))
 	assert.True(t, os.IsNotExist(statErr), "the directly listed managed project skill must be removed")
 	linkInfo, statErr := os.Lstat(globalSkill)
@@ -168,7 +168,7 @@ func TestSetupAgentsRemoveDoesNotDeduplicateOpenCodeSymlinkDestination(t *testin
 	assert.NotZero(t, linkInfo.Mode()&os.ModeSymlink, "the unmanaged symlink itself must be preserved")
 }
 
-func TestSetupAgentsRemovePreservesOpenCodeSkillBehindSymlinkedParent(t *testing.T) {
+func TestSetupAgentsRemoveDeletesOpenCodeSkillThroughSymlinkedParent(t *testing.T) {
 	home := emptyHome(t)
 	project := t.TempDir()
 	t.Chdir(project)
@@ -182,10 +182,9 @@ func TestSetupAgentsRemovePreservesOpenCodeSkillBehindSymlinkedParent(t *testing
 	require.NoError(t, os.Symlink(externalConfig, filepath.Join(home, ".config")))
 
 	_, err = runSetupAgentsRemove(t)
-	require.ErrorContains(t, err, "OpenCode (Global) skill: unsafe symlink traversal skipped")
-	data, readErr := os.ReadFile(filepath.Join(externalSkill, skillFilename))
-	require.NoError(t, readErr)
-	assert.Equal(t, embedded, data, "cleanup must not follow a symlinked OpenCode parent")
+	require.NoError(t, err)
+	_, statErr := os.Lstat(filepath.Join(externalSkill, skillFilename))
+	assert.True(t, os.IsNotExist(statErr), "a dotfiles-managed ~/.config must not block cleanup")
 }
 
 func TestSetupAgentsRemoveDeletesManagedProjectClaudeSkill(t *testing.T) {
@@ -203,7 +202,7 @@ func TestSetupAgentsRemoveDeletesManagedProjectClaudeSkill(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr))
 }
 
-func TestSetupAgentsRemovePreservesProjectClaudeSkillBehindSymlinkedParent(t *testing.T) {
+func TestSetupAgentsRemoveDeletesProjectClaudeSkillThroughSymlinkedParent(t *testing.T) {
 	emptyHome(t)
 	project := t.TempDir()
 	t.Chdir(project)
@@ -216,9 +215,30 @@ func TestSetupAgentsRemovePreservesProjectClaudeSkillBehindSymlinkedParent(t *te
 	require.NoError(t, os.Symlink(externalClaude, filepath.Join(project, ".claude")))
 
 	_, err := runSetupAgentsRemove(t)
-	require.ErrorContains(t, err, "project Claude Code skill: unsafe symlink traversal skipped")
+	require.NoError(t, err)
 	_, statErr := os.Lstat(filepath.Join(externalSkill, skillFilename))
-	assert.NoError(t, statErr, "cleanup must not follow a symlinked project Claude parent")
+	assert.True(t, os.IsNotExist(statErr), "a shared project .claude must not block cleanup")
+}
+
+// TestSetupAgentsRemovePreservesUnownedSkillBehindSymlinkedParent is the other
+// half: reaching through a user's symlinked parent is fine, claiming what sits
+// at the leaf is not.
+func TestSetupAgentsRemovePreservesUnownedSkillBehindSymlinkedParent(t *testing.T) {
+	emptyHome(t)
+	project := t.TempDir()
+	t.Chdir(project)
+
+	externalClaude := t.TempDir()
+	externalSkill := filepath.Join(externalClaude, "skills", "basecamp")
+	require.NoError(t, os.MkdirAll(externalSkill, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(externalSkill, skillFilename), []byte("mine"), 0o600))
+	require.NoError(t, os.Symlink(externalClaude, filepath.Join(project, ".claude")))
+
+	_, err := runSetupAgentsRemove(t)
+	require.NoError(t, err)
+	data, readErr := os.ReadFile(filepath.Join(externalSkill, skillFilename))
+	require.NoError(t, readErr)
+	assert.Equal(t, "mine", string(data), "an unowned leaf stays put wherever it is reached from")
 }
 
 func TestSetupAgentsRemoveDeletesAuthenticMarkerlessBaseline(t *testing.T) {
@@ -235,7 +255,7 @@ func TestSetupAgentsRemoveDeletesAuthenticMarkerlessBaseline(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr))
 }
 
-func TestSetupAgentsRemoveReportsSkippedSymlinkedBaseline(t *testing.T) {
+func TestSetupAgentsRemoveDeletesBaselineThroughSymlinkedAgentsDirectory(t *testing.T) {
 	home := emptyHome(t)
 	externalAgents := t.TempDir()
 	baseline := filepath.Join(externalAgents, "skills", "basecamp")
@@ -245,9 +265,9 @@ func TestSetupAgentsRemoveReportsSkippedSymlinkedBaseline(t *testing.T) {
 	require.NoError(t, os.Symlink(externalAgents, filepath.Join(home, ".agents")))
 
 	_, err := runSetupAgentsRemove(t)
-	require.ErrorContains(t, err, "agent skill: unsafe symlink traversal skipped")
-	_, statErr := os.Stat(filepath.Join(baseline, skillFilename))
-	assert.NoError(t, statErr, "cleanup must not follow a symlinked baseline parent")
+	require.NoError(t, err)
+	_, statErr := os.Lstat(filepath.Join(baseline, skillFilename))
+	assert.True(t, os.IsNotExist(statErr), "a dotfiles-managed ~/.agents must not block cleanup")
 }
 
 func TestSetupAgentsRemovePreservesUserFilesBesideMarkerlessManagedSkill(t *testing.T) {
@@ -290,15 +310,36 @@ func TestSetupAgentsRemoveUsesAbsoluteClaudeConfigWithInvalidRelativeHome(t *tes
 	assert.True(t, os.IsNotExist(statErr), "the self-contained Claude integration must still be removed")
 }
 
-func TestSafeSkillTraversalRejectsSymlinkedDefaultParents(t *testing.T) {
-	home := t.TempDir()
-	external := t.TempDir()
-	for _, parent := range []string{".agents", ".claude", ".codex"} {
-		require.NoError(t, os.Symlink(external, filepath.Join(home, parent)))
-		safe, err := safeSkillTraversal(home, filepath.Join(home, parent, "skills", "basecamp"))
-		require.NoError(t, err)
-		assert.False(t, safe, parent)
-	}
+// TestSetupAgentsInstallsAndRemovesThroughSymlinkedDotfileParents covers the
+// dotfiles layout end to end: ~/.agents and ~/.claude both point elsewhere, and
+// a full install followed by --remove has to leave nothing of ours behind.
+func TestSetupAgentsInstallsAndRemovesThroughSymlinkedDotfileParents(t *testing.T) {
+	home := emptyHome(t)
+	dotfiles := t.TempDir()
+	agents := filepath.Join(dotfiles, "agents")
+	claude := filepath.Join(dotfiles, "claude")
+	require.NoError(t, os.MkdirAll(agents, 0o755))
+	require.NoError(t, os.MkdirAll(claude, 0o755))
+	require.NoError(t, os.Symlink(agents, filepath.Join(home, ".agents")))
+	require.NoError(t, os.Symlink(claude, filepath.Join(home, ".claude")))
+
+	skillPath, err := installSkillFiles()
+	require.NoError(t, err)
+	require.FileExists(t, skillPath)
+	link, _, err := linkSkillToClaude()
+	require.NoError(t, err)
+	resolved, err := filepath.EvalSymlinks(link)
+	require.NoError(t, err)
+	baselineResolved, err := filepath.EvalSymlinks(filepath.Dir(skillPath))
+	require.NoError(t, err)
+	assert.Equal(t, baselineResolved, resolved, "the link must resolve to the managed baseline")
+
+	_, err = runSetupAgentsRemove(t)
+	require.NoError(t, err)
+	_, statErr := os.Lstat(link)
+	assert.True(t, os.IsNotExist(statErr), "the Claude link must be removed")
+	_, statErr = os.Lstat(filepath.Join(agents, "skills", "basecamp"))
+	assert.True(t, os.IsNotExist(statErr), "the baseline must be removed")
 }
 
 func TestRemoveCodexPluginReportsConfiguredHomeWithoutUserHome(t *testing.T) {
@@ -803,7 +844,7 @@ func TestRemoveOwnedOrLegacyCodexSkillRecognizesAuthenticPremarkerInstall(t *tes
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, skillFilename), embedded, 0o644))
 
-	removed, err := removeOwnedOrLegacyCodexSkill(dir)
+	removed, err := removeOwnedOrLegacySkill(dir)
 	require.NoError(t, err)
 	assert.True(t, removed)
 	_, statErr := os.Stat(dir)
@@ -820,7 +861,7 @@ func TestRemoveOwnedOrLegacyCodexSkillRecognizesAllowlistedPayload(t *testing.T)
 	t.Cleanup(func() { delete(legacyManagedSkillHashes, hash) })
 	require.NoError(t, os.WriteFile(filepath.Join(dir, skillFilename), payload, 0o644))
 
-	removed, err := removeOwnedOrLegacyCodexSkill(dir)
+	removed, err := removeOwnedOrLegacySkill(dir)
 	require.NoError(t, err)
 	assert.True(t, removed)
 }
@@ -867,7 +908,7 @@ func TestRemoveOwnedOrLegacyCodexSkillPreservesNonmatchingUserSkill(t *testing.T
 	path := filepath.Join(dir, skillFilename)
 	require.NoError(t, os.WriteFile(path, []byte("user-authored"), 0o644))
 
-	removed, err := removeOwnedOrLegacyCodexSkill(dir)
+	removed, err := removeOwnedOrLegacySkill(dir)
 	require.NoError(t, err)
 	assert.False(t, removed)
 	data, readErr := os.ReadFile(path)

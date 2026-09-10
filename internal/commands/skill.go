@@ -31,6 +31,16 @@ func (e *unmanagedSkillDirError) Error() string {
 	return fmt.Sprintf("%s exists but was not written by basecamp-cli; move it aside to let Basecamp install its skill there", e.dir)
 }
 
+// Unwrap reports an unowned destination as a usage error with a local remedy,
+// rather than attributing the refusal to the API.
+func (e *unmanagedSkillDirError) Unwrap() error {
+	return &output.Error{
+		Code:    output.CodeUsage,
+		Message: e.Error(),
+		Hint:    "Move " + e.dir + " aside, then re-run the install",
+	}
+}
+
 // skillLocation represents a predefined skill installation target.
 type skillLocation struct {
 	Name string
@@ -180,24 +190,11 @@ func claimSkillDir(dir string) error {
 // claimSkillDirForWrite also reports whether this call created the leaf
 // directory, allowing a failed first write to roll back only its own empty
 // claim and leave pre-existing directories untouched.
+//
+// Ownership is proven at the leaf only. A symlink anywhere above it is the
+// user's own layout — dotfiles-managed homes put one at ~/.claude or ~/.agents
+// — and changes where these checks run, not what they prove.
 func claimSkillDirForWrite(dir string) (bool, error) {
-	home, err := harness.UserHomeDir()
-	if err != nil {
-		return false, err
-	}
-	if skillPathWithin(home, dir) {
-		symlinked, inspectErr := hasSymlinkComponent(home, filepath.Dir(dir))
-		if inspectErr != nil {
-			return false, inspectErr
-		}
-		if symlinked {
-			return false, &unmanagedSkillDirError{dir: dir}
-		}
-	}
-	return claimSkillDirLeafForWrite(dir)
-}
-
-func claimSkillDirLeafForWrite(dir string) (bool, error) {
 	info, err := os.Lstat(dir)
 	switch {
 	case os.IsNotExist(err):
@@ -238,21 +235,9 @@ func claimPredefinedSkillDir(dir string) error {
 }
 
 func claimPredefinedSkillDirForWrite(dir string) (bool, error) {
-	root, rootErr := predefinedSkillRoot(dir)
-	if rootErr != nil {
-		return false, rootErr
-	}
-	symlinked, inspectErr := hasSymlinkComponent(root, filepath.Dir(dir))
-	if inspectErr != nil {
-		return false, inspectErr
-	}
-	if symlinked {
-		return false, &unmanagedSkillDirError{dir: dir}
-	}
-
 	info, err := os.Lstat(dir)
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
-		return claimSkillDirLeafForWrite(dir)
+		return claimSkillDirForWrite(dir)
 	}
 
 	home, homeErr := harness.UserHomeDir()
@@ -266,54 +251,6 @@ func claimPredefinedSkillDirForWrite(dir string) (bool, error) {
 		return false, nil
 	}
 	return false, &unmanagedSkillDirError{dir: dir}
-}
-
-func predefinedSkillRoot(dir string) (string, error) {
-	if !filepath.IsAbs(dir) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("getting working directory: %w", err)
-		}
-		return cwd, nil
-	}
-	home, err := harness.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	for _, configured := range []struct {
-		env     string
-		resolve func() (string, error)
-	}{
-		{env: "CLAUDE_CONFIG_DIR", resolve: harness.ClaudeConfigDir},
-		{env: "CODEX_HOME", resolve: harness.CodexHome},
-	} {
-		if os.Getenv(configured.env) == "" {
-			continue
-		}
-		root, resolveErr := configured.resolve()
-		if resolveErr != nil {
-			return "", resolveErr
-		}
-		if skillPathWithin(root, dir) {
-			return root, nil
-		}
-	}
-	if skillPathWithin(home, dir) {
-		return home, nil
-	}
-	// A path outside HOME and the configured agent roots is caller-supplied;
-	// only its leaf ownership is ours to validate here.
-	return filepath.Dir(dir), nil
-}
-
-func skillPathWithin(root, target string) bool {
-	root, rootErr := filepath.Abs(filepath.Clean(root))
-	target, targetErr := filepath.Abs(filepath.Clean(target))
-	if rootErr != nil || targetErr != nil {
-		return false
-	}
-	relative, err := filepath.Rel(root, target)
-	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func writeSkillFile(path string, data []byte) error {
@@ -565,18 +502,6 @@ func linkSkillToClaude() (string, string, error) {
 		!ownedSkillDir(skillDir) || !regularFile(filepath.Join(skillDir, skillFilename)) {
 		return "", "", &unmanagedSkillDirError{dir: skillDir}
 	}
-	claudeRoot := claudeConfig
-	if os.Getenv("CLAUDE_CONFIG_DIR") == "" {
-		claudeRoot = home
-	}
-	symlinked, inspectErr := hasSymlinkComponent(claudeRoot, symlinkDir)
-	if inspectErr != nil {
-		return "", "", inspectErr
-	}
-	if symlinked {
-		return "", "", &unmanagedSkillDirError{dir: symlinkDir}
-	}
-
 	if err := os.MkdirAll(symlinkDir, 0o755); err != nil { //nolint:gosec // G301: Skill files are not secrets
 		return "", "", fmt.Errorf("creating symlink directory: %w", err)
 	}
@@ -703,8 +628,23 @@ func refreshInstalledSkills() skillRefreshOutcome {
 	if claudeConfigErr != nil {
 		outcome.failed++
 	} else {
+		// A configured CLAUDE_CONFIG_DIR replaces the default global entry rather
+		// than adding to it, so an unset override does not refresh ~/.claude twice.
 		configured := filepath.Join(claudeConfig, "skills", "basecamp", skillFilename)
-		locations = append(locations, skillLocation{Name: "Claude Code (configured)", Path: configured})
+		replaced := false
+		for i, loc := range locations {
+			if loc.Name != "Claude Code (Global)" {
+				continue
+			}
+			if !pathsEquivalent(expandSkillPath(loc.Path), configured) {
+				locations[i] = skillLocation{Name: "Claude Code (configured)", Path: configured}
+			}
+			replaced = true
+			break
+		}
+		if !replaced {
+			locations = append(locations, skillLocation{Name: "Claude Code (configured)", Path: configured})
+		}
 	}
 	for _, loc := range locations {
 		// Skip project-relative paths — no reliable project root in PostRunE.
@@ -714,28 +654,6 @@ func refreshInstalledSkills() skillRefreshOutcome {
 
 		expanded := expandSkillPath(loc.Path)
 		dir := filepath.Dir(expanded)
-		root, rootErr := refreshLocationRoot(loc, expanded, claudeConfig)
-		if rootErr != nil {
-			outcome.failed++
-			continue
-		}
-		symlinked, inspectErr := hasSymlinkComponent(root, dir)
-		if inspectErr != nil {
-			outcome.failed++
-			continue
-		}
-		if symlinked {
-			// Claude's canonical installation is intentionally a symlink to the
-			// shared managed baseline. Leave it for repairClaudeSkillLink below;
-			// every other predefined symlink remains untrusted.
-			if strings.HasPrefix(loc.Name, "Claude Code") && managedClaudeSkillLink(dir) {
-				continue
-			}
-			if ownedOrLegacySkillDir(dir) || invalidSkillMarker(dir) {
-				outcome.failed++
-			}
-			continue
-		}
 		dirInfo, dirErr := os.Lstat(dir)
 		if os.IsNotExist(dirErr) {
 			continue
@@ -744,7 +662,9 @@ func refreshInstalledSkills() skillRefreshOutcome {
 			outcome.failed++
 			continue
 		}
-		// Never follow a parent symlink while refreshing a predefined location.
+		// A symlink at the skill directory itself is user state, except for
+		// Claude's canonical installation, which is intentionally a link to the
+		// shared managed baseline and is repaired by repairClaudeSkillLink below.
 		if dirInfo.Mode()&os.ModeSymlink != 0 || !dirInfo.IsDir() {
 			continue
 		}
@@ -818,25 +738,6 @@ func refreshInstalledSkills() skillRefreshOutcome {
 	return outcome
 }
 
-func refreshLocationRoot(loc skillLocation, expanded, claudeConfig string) (string, error) {
-	if loc.Name == "Claude Code (configured)" {
-		if os.Getenv("CLAUDE_CONFIG_DIR") == "" {
-			return harness.UserHomeDir()
-		}
-		return claudeConfig, nil
-	}
-	if loc.Name == "Codex (Global)" {
-		if os.Getenv("CODEX_HOME") != "" {
-			return harness.CodexHome()
-		}
-		return harness.UserHomeDir()
-	}
-	if strings.HasPrefix(loc.Path, "~") {
-		return harness.UserHomeDir()
-	}
-	return filepath.VolumeName(expanded) + string(filepath.Separator), nil
-}
-
 func invalidSkillMarker(dir string) bool {
 	for _, marker := range []string{ownershipMarkerFile, installedVersionFile} {
 		markerInfo, markerErr := os.Lstat(filepath.Join(dir, marker))
@@ -848,26 +749,6 @@ func invalidSkillMarker(dir string) bool {
 		}
 	}
 	return false
-}
-
-func managedClaudeSkillLink(path string) bool {
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 {
-		return false
-	}
-	target, err := os.Readlink(path)
-	if err != nil {
-		return false
-	}
-	home, err := harness.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	baseline := filepath.Join(home, ".agents", "skills", "basecamp")
-	if !ownedOrLegacySkillDir(baseline) {
-		return false
-	}
-	return pathsEquivalent(path, baseline) || brokenLinkTargetsPath(path, target, baseline)
 }
 
 // repairClaudeSkillLink repairs a broken basecamp-cli symlink in Claude's
