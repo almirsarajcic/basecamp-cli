@@ -352,8 +352,8 @@ func TestCopySkillFilesAcceptsLegacyVersionOwnershipWithoutMarker(t *testing.T) 
 }
 
 // Pin the literals rather than deriving them, so a test can't mirror a typo the
-// code has. Codex's entry is computed by codexGlobalSkillPath and covered
-// separately.
+// code has. The Codex and Grok entries are computed by agentHomeSkillPath and
+// covered by TestAgentHomeSkillPath.
 //
 // These are install targets, not the full set of paths an agent reads. opencode
 // takes an optional plural throughout — its own table reads
@@ -376,6 +376,34 @@ func TestSkillLocationsMatchAgentSearchPaths(t *testing.T) {
 	for name, path := range want {
 		assert.Equal(t, path, got[name], "install target for %s", name)
 	}
+}
+
+// Codex and Grok read skills from their own home, which each relocates with
+// an environment variable; the picker row follows it.
+func TestAgentHomeSkillPath(t *testing.T) {
+	for _, tc := range []struct{ name, env, home string }{
+		{"Codex (Global)", "CODEX_HOME", "~/.codex"},
+		{"Grok (Global)", "GROK_HOME", "~/.grok"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(tc.env, "")
+			assert.Equal(t, tc.home+"/skills/basecamp/SKILL.md", agentHomeSkillPath(tc.env, tc.home))
+
+			override := t.TempDir()
+			t.Setenv(tc.env, " "+override+" ")
+			assert.Equal(t, filepath.Join(override, "skills", "basecamp", "SKILL.md"), agentHomeSkillPath(tc.env, tc.home))
+		})
+	}
+
+	// The rows the picker offers are those two, at their default homes.
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("GROK_HOME", "")
+	got := map[string]string{}
+	for _, loc := range skillLocations {
+		got[loc.Name] = loc.Path
+	}
+	assert.Equal(t, "~/.codex/skills/basecamp/SKILL.md", got["Codex (Global)"])
+	assert.Equal(t, "~/.grok/skills/basecamp/SKILL.md", got["Grok (Global)"])
 }
 
 // A wizard install written before #624 sits at opencode's singular path.
@@ -1090,7 +1118,7 @@ func TestRefreshAllInstalledSkillsSkipsRelativeCodexHome(t *testing.T) {
 	})
 	require.NotEqual(t, -1, index)
 	original := skillLocations[index].Path
-	skillLocations[index].Path = codexGlobalSkillPath()
+	skillLocations[index].Path = agentHomeSkillPath("CODEX_HOME", "~/.codex")
 	t.Cleanup(func() { skillLocations[index].Path = original })
 
 	dir := filepath.Join(project, ".codex", "skills", "basecamp")

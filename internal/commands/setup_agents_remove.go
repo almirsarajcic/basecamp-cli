@@ -201,6 +201,7 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 	}
 
 	removeOpenCodeSkills(home, &removed, &failures)
+	removeSkillAgentSkills(home, &removed, &failures)
 
 	if baseline != "" && claudeLinksHandled {
 		if didRemove, removeErr := removeOwnedOrLegacySkill(baseline); removeErr != nil {
@@ -227,6 +228,32 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 	}
 
 	return app.OK(result, output.WithSummary("Coding-agent integrations removed"))
+}
+
+// Shared-skill agents can also have an explicitly installed home-local copy.
+func removeSkillAgentSkills(home string, removed, failures *[]string) {
+	seen := make(map[string]bool)
+	for _, agent := range harness.SkillAgents() {
+		homes := []string{agent.Home()}
+		if home != "" {
+			homes = append(homes, filepath.Join(home, agent.HomeDir))
+		}
+		for _, agentHome := range homes {
+			if agentHome == "" {
+				continue
+			}
+			dir := filepath.Join(agentHome, "skills", "basecamp")
+			if seen[dir] {
+				continue
+			}
+			seen[dir] = true
+			if didRemove, err := removeOwnedOrLegacySkill(dir); err != nil {
+				*failures = append(*failures, agent.Name+" skill: "+err.Error())
+			} else if didRemove {
+				*removed = append(*removed, agent.Name+" skill")
+			}
+		}
+	}
 }
 
 func removeOpenCodeSkills(home string, removed, failures *[]string) {

@@ -1128,3 +1128,36 @@ func TestSetupAgentsRemovePartialFailureHasStructuredMetadata(t *testing.T) {
 	require.NotEmpty(t, envelope.Meta.Failures)
 	assert.Contains(t, envelope.Meta.Failures[0], "codex binary not found")
 }
+
+func TestRemoveSkillAgentSkills(t *testing.T) {
+	for _, managed := range []bool{true, false} {
+		t.Run(fmt.Sprint(managed), func(t *testing.T) {
+			home := emptyHome(t)
+			custom := t.TempDir()
+			t.Setenv("GROK_HOME", custom)
+			for _, root := range []string{custom, filepath.Join(home, ".grok")} {
+				dir := filepath.Join(root, "skills", "basecamp")
+				require.NoError(t, os.MkdirAll(dir, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, skillFilename), []byte("user payload"), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("keep"), 0o644))
+				if managed {
+					require.NoError(t, os.WriteFile(filepath.Join(dir, ownershipMarkerFile), nil, 0o644))
+				}
+			}
+			var removed, failures []string
+			removeSkillAgentSkills(home, &removed, &failures)
+			require.Empty(t, failures)
+			for _, root := range []string{custom, filepath.Join(home, ".grok")} {
+				dir := filepath.Join(root, "skills", "basecamp")
+				assert.FileExists(t, filepath.Join(dir, "notes.txt"))
+				if managed {
+					assert.NoFileExists(t, filepath.Join(dir, skillFilename))
+				} else {
+					assert.FileExists(t, filepath.Join(dir, skillFilename))
+				}
+			}
+			removeSkillAgentSkills(home, &removed, &failures)
+			require.Empty(t, failures)
+		})
+	}
+}

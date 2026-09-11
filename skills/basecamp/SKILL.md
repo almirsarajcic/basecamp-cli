@@ -1378,7 +1378,7 @@ basecamp setup agents --json                      # Structured result envelope
 basecamp setup agents --remove                    # Remove CLI-managed agent integrations only
 ```
 `setup agents` installs the baseline skill and connects coding agents without
-prompting. Selection is driven by `BASECAMP_SETUP_AGENT` (`claude`, `codex`,
+prompting. Selection is driven by `BASECAMP_SETUP_AGENT` (`claude`, `codex`, `grok`,
 `all`, or `none`); unset auto-detects — one detected agent is connected, several
 leave the skill only and surface the per-agent `basecamp setup <id>` commands.
 `--remove` removes Basecamp-managed skills and Claude/Codex plugins without
