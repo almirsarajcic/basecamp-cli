@@ -741,16 +741,41 @@ func TestRunAgentRemoveCommandOutlivingGrandchild(t *testing.T) {
 
 	done := make(chan struct{})
 	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
 	go func() {
 		defer close(done)
-		_, _ = runAgentRemoveCommand(context.Background(), sh, "", "-c", script)
+		_, _ = runAgentRemoveCommand(ctx, sh, "", "-c", script)
 	}()
 	select {
 	case <-done:
-		assert.Less(t, time.Since(start), 10*time.Second)
-	case <-time.After(10 * time.Second):
+		assert.Less(t, time.Since(start), 2*time.Second)
+	case <-time.After(2 * time.Second):
 		t.Fatal("removal command remained blocked on a grandchild's output pipe")
 	}
+}
+
+func TestSetupAgentsRemoveCleansConfiguredAndLegacyClaudePlugins(t *testing.T) {
+	home := emptyHome(t)
+	claude := installExecutableStub(t, "claude")
+	customConfig := filepath.Join(home, "custom-claude")
+	defaultConfig := filepath.Join(home, ".claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", customConfig)
+	writeClaudeRegistry(t, customConfig, `{"version":2,"plugins":{"basecamp@37signals":[{"scope":"user"}]}}`)
+	writeClaudeRegistry(t, defaultConfig, `{"version":2,"plugins":{"basecamp@37signals":[{"scope":"user"}]}}`)
+
+	var configs []string
+	stubAgentRemoveCommand(t, func(ctx context.Context, path, dir string, args ...string) ([]byte, error) {
+		assert.Equal(t, claude, path)
+		assert.Empty(t, dir)
+		assert.Equal(t, []string{"plugin", "uninstall", "basecamp@37signals", "--scope", "user"}, args)
+		configs = append(configs, claudeConfigDirFromContext(ctx))
+		return nil, nil
+	})
+
+	response, err := runSetupAgentsRemove(t)
+	require.NoError(t, err, string(response))
+	assert.ElementsMatch(t, []string{customConfig, defaultConfig}, configs)
 }
 
 func TestRemoveClaudePluginReportsUntargetableProjectScope(t *testing.T) {

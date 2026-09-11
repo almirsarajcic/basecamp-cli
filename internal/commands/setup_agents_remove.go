@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,8 +48,60 @@ var legacyManagedSkillHashes = map[string]struct{}{
 var runAgentRemoveCommand = func(ctx context.Context, path, dir string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, path, args...) //nolint:gosec // path comes from exec.LookPath
 	command.Dir = dir
+	if configDir := claudeConfigDirFromContext(ctx); configDir != "" {
+		command.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+configDir)
+	}
+	startRemoveProcessGroup(command)
 	command.WaitDelay = time.Second
-	return command.CombinedOutput()
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	command.Stderr = command.Stdout
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+	read := make(chan commandRead, 1)
+	go func() {
+		data, readErr := io.ReadAll(stdout)
+		read <- commandRead{data: data, err: readErr}
+	}()
+	var output commandRead
+	select {
+	case output = <-read:
+	case <-ctx.Done():
+		_ = killRemoveProcessGroup(command)
+		select {
+		case output = <-read:
+		case <-time.After(time.Second):
+			_ = stdout.Close()
+			output = <-read
+		}
+	}
+	waitErr := command.Wait()
+	if ctx.Err() != nil {
+		return output.data, ctx.Err()
+	}
+	if waitErr != nil {
+		return output.data, waitErr
+	}
+	return output.data, output.err
+}
+
+type commandRead struct {
+	data []byte
+	err  error
+}
+
+type claudeConfigContextKey struct{}
+
+func withClaudeConfigDir(ctx context.Context, configDir string) context.Context {
+	return context.WithValue(ctx, claudeConfigContextKey{}, configDir)
+}
+
+func claudeConfigDirFromContext(ctx context.Context) string {
+	value, _ := ctx.Value(claudeConfigContextKey{}).(string)
+	return value
 }
 
 type setupRemoveError struct {
@@ -116,6 +169,18 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 			removed = append(removed, "Claude Code plugin")
 		}
 		failures = append(failures, claudeFailures...)
+		if homeAvailable {
+			defaultClaudeConfig := filepath.Join(home, ".claude")
+			if !pathEntriesEquivalent(defaultClaudeConfig, claudeConfig) {
+				legacyRemoved, legacyFailures := removeClaudePlugin(cmd.Context(), defaultClaudeConfig)
+				if legacyRemoved {
+					removed = append(removed, "legacy Claude Code plugin")
+				}
+				for _, failure := range legacyFailures {
+					failures = append(failures, "legacy "+failure)
+				}
+			}
+		}
 
 		claudeSkill := filepath.Join(claudeConfig, "skills", "basecamp")
 		// A custom Claude config may place its skill at the shared baseline.
@@ -295,6 +360,7 @@ func removeOpenCodeSkills(home string, removed, failures *[]string) {
 }
 
 func removeClaudePlugin(parent context.Context, configDir string) (bool, []string) {
+	parent = withClaudeConfigDir(parent, configDir)
 	installations, err := readClaudePluginInstallations(configDir)
 	if err != nil {
 		return false, []string{"Claude Code plugin: " + err.Error()}
