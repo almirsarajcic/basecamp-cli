@@ -216,7 +216,11 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 		}
 	}
 	projectClaudeSkill := filepath.Join(".claude", "skills", "basecamp")
-	if !pathEntriesEquivalent(projectClaudeSkill, configuredClaudeSkill) && !pathEntriesEquivalent(projectClaudeSkill, legacyClaudeSkill) {
+	// The shared baseline is removed only after every Claude link slot has been
+	// handled, so a failed cleanup can still be retried safely.
+	if !pathEntriesEquivalent(projectClaudeSkill, configuredClaudeSkill) &&
+		!pathEntriesEquivalent(projectClaudeSkill, legacyClaudeSkill) &&
+		!pathEntriesEquivalent(projectClaudeSkill, baseline) {
 		if didRemove, removeErr := removeOwnedOrLegacySkill(projectClaudeSkill); removeErr != nil {
 			failures = append(failures, "project Claude Code skill: "+removeErr.Error())
 		} else if didRemove {
@@ -265,8 +269,8 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 		}
 	}
 
-	removeOpenCodeSkills(home, &removed, &failures)
-	removeSkillAgentSkills(home, &removed, &failures)
+	removeOpenCodeSkills(home, baseline, &removed, &failures)
+	removeSkillAgentSkills(home, baseline, &removed, &failures)
 
 	if baseline != "" && claudeLinksHandled {
 		if didRemove, removeErr := removeOwnedOrLegacySkill(baseline); removeErr != nil {
@@ -296,7 +300,7 @@ func runRemoveAgentSetup(cmd *cobra.Command, app *appctx.App) error {
 }
 
 // Shared-skill agents can also have an explicitly installed home-local copy.
-func removeSkillAgentSkills(home string, removed, failures *[]string) {
+func removeSkillAgentSkills(home, baseline string, removed, failures *[]string) {
 	seen := make(map[string]bool)
 	for _, agent := range harness.SkillAgents() {
 		homes := []string{agent.Home()}
@@ -308,6 +312,9 @@ func removeSkillAgentSkills(home string, removed, failures *[]string) {
 				continue
 			}
 			dir := filepath.Join(agentHome, "skills", "basecamp")
+			if pathEntriesEquivalent(dir, baseline) {
+				continue
+			}
 			if seen[dir] {
 				continue
 			}
@@ -321,7 +328,7 @@ func removeSkillAgentSkills(home string, removed, failures *[]string) {
 	}
 }
 
-func removeOpenCodeSkills(home string, removed, failures *[]string) {
+func removeOpenCodeSkills(home, baseline string, removed, failures *[]string) {
 	locations := append(append([]skillLocation{}, skillLocations...), legacySkillLocations...)
 	seen := make(map[string]struct{})
 	_, projectRootErr := os.Getwd()
@@ -342,6 +349,9 @@ func removeOpenCodeSkills(home string, removed, failures *[]string) {
 		dir := filepath.Clean(filepath.Dir(path))
 		if absolute, err := filepath.Abs(dir); err == nil {
 			dir = absolute
+		}
+		if pathEntriesEquivalent(dir, baseline) {
+			continue
 		}
 		// Deduplicate configured path entries, not their resolved destinations.
 		// An unmanaged symlink at one location may point at a managed directory

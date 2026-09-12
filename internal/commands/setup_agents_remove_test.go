@@ -1170,7 +1170,7 @@ func TestRemoveSkillAgentSkills(t *testing.T) {
 				}
 			}
 			var removed, failures []string
-			removeSkillAgentSkills(home, &removed, &failures)
+			removeSkillAgentSkills(home, "", &removed, &failures)
 			require.Empty(t, failures)
 			for _, root := range []string{custom, filepath.Join(home, ".grok")} {
 				dir := filepath.Join(root, "skills", "basecamp")
@@ -1181,8 +1181,23 @@ func TestRemoveSkillAgentSkills(t *testing.T) {
 					assert.FileExists(t, filepath.Join(dir, skillFilename))
 				}
 			}
-			removeSkillAgentSkills(home, &removed, &failures)
+			removeSkillAgentSkills(home, "", &removed, &failures)
 			require.Empty(t, failures)
 		})
 	}
+}
+
+func TestSetupAgentsRemoveRetainsBaselineWhenAliasedAgentCleanupPrecedesClaudeFailure(t *testing.T) {
+	home := emptyHome(t)
+	baseline, err := installSkillFiles()
+	require.NoError(t, err)
+
+	alias := filepath.Join(home, "grok-home")
+	require.NoError(t, os.Symlink(filepath.Join(home, ".agents"), alias))
+	t.Setenv("GROK_HOME", alias)
+	t.Setenv("CLAUDE_CONFIG_DIR", "relative/config")
+
+	_, err = runSetupAgentsRemove(t)
+	require.Error(t, err)
+	assert.FileExists(t, baseline, "the baseline must remain available for a retry")
 }
