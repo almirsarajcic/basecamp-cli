@@ -4672,3 +4672,24 @@ func TestAttachmentMetaSinksSanitized(t *testing.T) {
 	assertSinkNeutralized(t, render(FormatStyled), "styled attachment meta", true)
 	assertSinkNeutralized(t, render(FormatMarkdown), "markdown attachment meta", false)
 }
+
+func TestTableColumnsComeFromEveryRow(t *testing.T) {
+	// Like `basecamp profile list`: default and active are set only on the
+	// row they apply to, and it is not the first.
+	rows := []map[string]any{
+		{"name": "a", "base_url": "https://3.basecampapi.com", "authenticated": true, "account_id": "1"},
+		{"name": "b", "base_url": "https://3.basecampapi.com", "authenticated": true, "account_id": "1", "default": true, "active": true},
+	}
+	want := []string{"name", "account_id", "active", "authenticated", "base_url", "default"}
+	keys := func(cols []column) []string {
+		ks := make([]string, 0, len(cols))
+		for _, c := range cols {
+			ks = append(ks, c.key)
+		}
+		return ks
+	}
+	for range 20 { // equal priorities once followed map order
+		assert.Equal(t, want, keys((&Renderer{width: 200}).detectColumns(rows)))
+		assert.Equal(t, want, keys((&MarkdownRenderer{}).detectColumns(rows)))
+	}
+}
