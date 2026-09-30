@@ -273,6 +273,17 @@ type connectSetupFlags struct {
 	worker   string
 	parallel int
 	deadline time.Duration
+
+	// guided is the guided setup running this one: a setup that passes says
+	// so in a line, since the guided summary names the agent, its owner and
+	// its projects. A failure still lists every check. It only ever makes a
+	// connect.json, so it refuses one that appeared while it was asking.
+	guided bool
+	// shownAgent and shownAccount are the agent and account guided setup
+	// showed the person; setup refuses to save for any other (0 and "" when
+	// not guided).
+	shownAgent   int64
+	shownAccount string
 }
 
 func newConnectSetupCmd() *cobra.Command {
@@ -293,11 +304,12 @@ On the bot-user path pass --expect-identity to setup as well, so it can prove
 the login is the bot and not you; later runs remember it.
 
 Operator. The person whose instructions the agent follows, keyed on Person
-id. Name them by their own profile (--operator-profile, which proves who
-they are), or by id (--operator), which the agent must be able to read —
-Basecamp refuses that read to an Agent identity today, so on the agent
-connection path use --operator-profile. With neither, setup keeps the operator
-connect.json already has; on a first setup one of the two is required.
+id. A personal agent's operator is its owner, whom Basecamp names in the
+agent's own profile, so no flag is needed for one. Otherwise name them by
+their own profile (--operator-profile, which proves who they are), or by id
+(--operator), which the agent must be able to read. With neither, setup keeps
+the operator connect.json already has; on a first setup of an agent with no
+owner, one of the two is required.
 
 Trust. operator (default): the operator alone. allowlist: the operator and
 the people passed with --allow. project: the operator and any non-client
@@ -330,17 +342,32 @@ as by any command.
 
 Run setup again to change any of it; what you do not pass is kept.
 
+Guided. In a terminal, with none of the flags that set policy, setup walks
+you through instead: it connects this computer to your agent when it is not
+(or no longer) connected, takes your agent's owner as the operator, asks
+which of your agent's projects it works in (all of them by default), and
+writes connect.json, offering to set it up again when the one there can't
+be used or is for another agent. It ends by saying how to start the
+connector: in the folder it should work in, left running. Run it again any
+time: it takes the next step, or says everything is set.
+
 Examples:
+  basecamp connect setup                                # guided, in a terminal
   basecamp auth agent connect -P agent
+  basecamp connect setup -P agent --serve 12345         # a personal agent: its owner operates it
   basecamp connect setup -P agent --operator-profile me --serve 12345
   basecamp connect setup -P agent --operator-profile me --trust allowlist --allow 111 --allow 222
   basecamp connect setup -P bot --operator-profile me --expect-identity 4242 --serve 12345
   basecamp connect setup -P agent --class 12345=internal --deadline 90m`,
-		Args: cobra.NoArgs,
+		Annotations: map[string]string{AnnotationProfileMayCreate: "true"},
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app := appctx.FromContext(cmd.Context())
 			if app == nil {
 				return fmt.Errorf("app not initialized")
+			}
+			if connectSetupGuided(cmd, app) {
+				return runGuidedConnectSetup(cmd, app, &f)
 			}
 			return runConnectSetup(cmd, app, &f)
 		},
@@ -421,16 +448,23 @@ func runConnectSetup(cmd *cobra.Command, app *appctx.App, f *connectSetupFlags) 
 	if existing.Profile != name {
 		return output.ErrUsage(fmt.Sprintf("%s names profile %q, not %q", path, existing.Profile, name))
 	}
+	// Guided setup makes connect.json only where there was none. One written
+	// while it was asking is another setup's, and its trust may not be what
+	// guided setup told the person: it is left as it is.
+	if f.guided && exists {
+		return output.ErrUsageHint("This agent was set up by another command while setup was asking about it, so nothing was changed",
+			runGuidedSetupAgain(name))
+	}
 
 	// Everything refusable without the network is refused first.
 	next, err := setup.Apply(existing, changes)
 	if err != nil {
 		return output.ErrUsage(err.Error())
 	}
-	if operatorID == 0 && f.operatorProfile == "" && existing.Trust.OperatorID == 0 {
-		return output.ErrUsageHint("Setup needs to know who the operator is",
-			"Pass --operator-profile <your profile> (or --operator <your person id>). The operator is the person the agent takes instructions from, and is never guessed.")
-	}
+	// With no operator named or recorded, a personal agent's operator is the
+	// person it works for, which Basecamp says in the agent's own profile.
+	// Anyone else is never guessed: that is refused below, after the read.
+	operatorFromOwner := operatorID == 0 && f.operatorProfile == "" && existing.Trust.OperatorID == 0
 	var operatorMgr *operatorProfile
 	if f.operatorProfile != "" {
 		if operatorMgr, err = operatorProfileManager(ctx, app, f.operatorProfile); err != nil {
@@ -499,6 +533,13 @@ func runConnectSetup(cmd *cobra.Command, app *appctx.App, f *connectSetupFlags) 
 	if err != nil {
 		return output.ErrAuth(fmt.Sprintf("Could not read who profile %q is in account %s: %s", name, accountID, setup.ErrorText(err)))
 	}
+	// Guided setup asked its questions about one agent; a credential stored
+	// under the profile since, for another, is not what the person answered
+	// for (Codex on #794).
+	if f.shownAgent != 0 && (me.ID != f.shownAgent || accountID != f.shownAccount) {
+		return output.ErrUsageHint("This computer was connected to a different agent while setup was asking about it, so nothing was set up",
+			"Run basecamp connect setup again.")
+	}
 	identityCheck, err := checkConnectIdentity(ctx, app, client, kind, creds.OAuthType, me, expect)
 	if err != nil {
 		return err
@@ -522,14 +563,25 @@ func runConnectSetup(cmd *cobra.Command, app *appctx.App, f *connectSetupFlags) 
 		trust.Recorded = existing.Trust
 	}
 	people := setup.Reader(reader)
-	if operatorMgr != nil {
+	switch {
+	case operatorFromOwner:
+		owner, ok, err := readAgentOwner(ctx, client.ForAccount(accountID), kind)
+		if err != nil {
+			return output.ErrAuth(fmt.Sprintf("Could not read who agent %q works for: %s", me.Name, setup.ErrorText(err)))
+		}
+		if !ok {
+			return errOperatorRequired()
+		}
+		trust.Operator = owner
+		trust.OperatorIsOwner = true
+	case operatorMgr != nil:
 		op, opReader, err := resolveOperatorProfile(ctx, operatorMgr, f.operatorProfile, accountID)
 		if err != nil {
 			return err
 		}
 		trust.Operator = op
 		people = opReader
-	} else {
+	default:
 		if operatorID == 0 {
 			operatorID = existing.Trust.OperatorID
 		}
@@ -610,7 +662,11 @@ func runConnectSetup(cmd *cobra.Command, app *appctx.App, f *connectSetupFlags) 
 	if !report.Ready() {
 		return errConnectorNotReady(report)
 	}
-	if styled {
+	switch {
+	case styled && f.guided:
+		renderGuidedChecks(w, report.Checks())
+		return nil
+	case styled:
 		renderChecksStyled(w, title, summary)
 		fmt.Fprintf(w, "  connect.json written: %s\n\n", richtext.SanitizeSingleLine(path))
 		return nil
