@@ -5,11 +5,15 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -277,5 +281,84 @@ func TestPromptFloorCovers(t *testing.T) {
 		}
 		assert.True(t, covered[fn.Name.Name],
 			"forms.go exports %s but promptFloors() does not exercise its non-interactive floor", fn.Name.Name)
+	}
+}
+
+// A prompt opens on its default, so pressing Enter picks it, and an answer
+// typed against the default wins. It used to open on No whatever the default,
+// and a guided setup that asked "Work in all of your agent's projects?"
+// (default Yes) ended with none chosen. The answers go through the field's own
+// input handling, so the prompt must be bound to what Confirm returns.
+func TestConfirmAnsweredWithEnterIsItsDefault(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	for _, tc := range []struct {
+		def   bool
+		typed string
+		want  bool
+	}{
+		{def: true, typed: "\n", want: true},
+		{def: false, typed: "\n", want: false},
+		{def: true, typed: "n\n", want: false},
+		{def: false, typed: "y\n", want: true},
+	} {
+		answerConfirmWith(t, tc.typed)
+		got, err := Confirm("Go ahead?", tc.def)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, got, "default %v, typed %q", tc.def, tc.typed)
+	}
+}
+
+// Accessible mode answers end of input with the default, so Ctrl+D must not
+// consent to a question that defaults to Yes.
+func TestConfirmInAccessibleModeNeverTakesYesFromEndOfInput(t *testing.T) {
+	t.Setenv("TERM", "dumb")
+	answerConfirmWith(t, "") // end of input, no answer
+
+	got, err := Confirm("Set up Basecamp for your coding agents?", true)
+	require.NoError(t, err)
+	assert.False(t, got)
+}
+
+// answerConfirmWith makes Confirm's form read typed from its field's own
+// accessible input handling, as a person at a dumb terminal would type it.
+func answerConfirmWith(t *testing.T, typed string) {
+	t.Helper()
+	prev := runConfirmForm
+	t.Cleanup(func() { runConfirmForm = prev })
+	runConfirmForm = func(fields ...huh.Field) error {
+		require.Len(t, fields, 1)
+		return fields[0].(*huh.Confirm).RunAccessible(io.Discard, strings.NewReader(typed))
+	}
+}
+
+// The interactive prompt, key by key: Enter submits whatever the prompt
+// opened on, y and n answer, and the arrows toggle. These are huh's key
+// bindings, as runForm sets them, working on Confirm's own field.
+func TestConfirmFieldAnswersFromTheKeyboard(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+	for _, tc := range []struct {
+		def  bool
+		keys []tea.KeyMsg
+		want bool
+	}{
+		{def: true, keys: []tea.KeyMsg{enter}, want: true},
+		{def: false, keys: []tea.KeyMsg{enter}, want: false},
+		{def: true, keys: []tea.KeyMsg{{Type: tea.KeyRunes, Runes: []rune("n")}}, want: false},
+		{def: false, keys: []tea.KeyMsg{{Type: tea.KeyRunes, Runes: []rune("y")}}, want: true},
+		{def: true, keys: []tea.KeyMsg{{Type: tea.KeyLeft}, enter}, want: false},
+	} {
+		result := tc.def
+		field := confirmField("Go ahead?", &result)
+		field.WithKeyMap(escKeyMap()) // the key map runForm gives every form
+		field.Focus()
+		var last tea.Cmd
+		for _, k := range tc.keys {
+			_, last = field.Update(k)
+		}
+		assert.Equal(t, tc.want, result, "default %v, keys %v", tc.def, tc.keys)
+		// Every sequence ends on a key that answers, so the prompt moves on.
+		require.NotNil(t, last, "keys %v", tc.keys)
+		assert.Equal(t, huh.NextField(), last(), "keys %v", tc.keys)
 	}
 }
