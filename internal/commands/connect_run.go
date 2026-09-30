@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,6 +22,7 @@ import (
 	"github.com/basecamp/basecamp-sdk/go/pkg/basecamp/eventfeed"
 
 	"github.com/basecamp/basecamp-cli/internal/appctx"
+	"github.com/basecamp/basecamp-cli/internal/auth"
 	"github.com/basecamp/basecamp-cli/internal/config"
 	"github.com/basecamp/basecamp-cli/internal/connector"
 	"github.com/basecamp/basecamp-cli/internal/connector/admission"
@@ -238,6 +240,11 @@ func runConnect(cmd *cobra.Command, f *connectRunFlags) error {
 	client := connectSDKClient(app, tokens)
 	accountClient := client.ForAccount(account)
 	me, err := (setup.SDKReader{Client: accountClient}).Me(ctx)
+	if agentDisconnectedAtStart(kind, err) {
+		// Disconnected while the connector wasn't running: said the way a
+		// running connector says it, with no name, since reading it failed.
+		return errAgentDisconnected("", name)
+	}
 	if err != nil {
 		return output.ErrAuth(fmt.Sprintf("Could not read who profile %q is: %s", name, setup.ErrorText(err)))
 	}
@@ -425,9 +432,10 @@ func runConnect(cmd *cobra.Command, f *connectRunFlags) error {
 		os.Exit(connector.ExitCodeForSignal(sig))
 	}()
 
+	stopState, stopDetail := connector.ConnectionStopped, ""
 	defer func() {
 		// Whatever ended the run, status says it is not running any more.
-		_ = ledger.NoteConnection(context.WithoutCancel(ctx), connector.ConnectionStopped, "")
+		_ = ledger.NoteConnection(context.WithoutCancel(ctx), stopState, stopDetail)
 	}()
 	logger.Info("connector: running", "profile", richtext.SanitizeSingleLine(name), "account", account,
 		"agent_person_id", agentID, "shadow", f.shadow, "projects", len(buckets), "state", richtext.SanitizeSingleLine(stateDir))
@@ -504,11 +512,80 @@ func runConnect(cmd *cobra.Command, f *connectRunFlags) error {
 	case sig == syscall.SIGTERM:
 		return output.ErrTerminated("connector terminated")
 	case firstErr != nil:
-		return firstErr
+		var err error
+		refused := func() bool { return confirmAgentRefused(context.WithoutCancel(ctx), app, kind, name) }
+		stopState, stopDetail, err = connectorStoppedBy(firstErr, me.Name, name, refused)
+		if err != firstErr { //nolint:errorlint // identity: was firstErr put in the person's words
+			logger.Error("connector: Basecamp refused the agent's credential", "error", firstErr)
+		}
+		return err
 	case ctx.Err() != nil:
 		return ctx.Err()
 	}
 	return nil
+}
+
+// connectorStoppedBy is what the connector exits with when one of its parts
+// stopped it with err, and the connection state status keeps for that. The
+// stop people meet — the agent was disconnected in Basecamp, or connected on
+// another computer — is said in their words; anything else is returned as it
+// is. The feed's authorization_failed counts forbidden answers too, so it is
+// called a disconnect only when refused, asking Basecamp, confirms it; a
+// refused token renewal is already Basecamp's answer.
+func connectorStoppedBy(err error, agent, profile string, refused func() bool) (state, detail string, exit error) {
+	disconnected := errors.Is(err, auth.ErrAgentCredentialRefused) || (feedAuthorizationFailed(err) && refused())
+	if !disconnected {
+		return connector.ConnectionStopped, "", err
+	}
+	e := errAgentDisconnected(agent, profile)
+	return connector.ConnectionDisconnected, e.Message, e
+}
+
+// agentDisconnectedAtStart reports whether the connector's first read of who
+// it is failed because Basecamp refused an Agent's credential: a token
+// renewal it refused, or a token minted before the disconnect that it no
+// longer takes (disconnecting doesn't revoke tokens, so one can still be
+// cached). A bot user's login keeps its own error.
+func agentDisconnectedAtStart(kind string, err error) bool {
+	if kind != setup.KindAgent || err == nil {
+		return false
+	}
+	var apiErr *basecamp.Error
+	return errors.Is(err, auth.ErrAgentCredentialRefused) ||
+		(errors.As(err, &apiErr) && apiErr.HTTPStatus == http.StatusUnauthorized)
+}
+
+// confirmAgentRefused asks Basecamp whether it still takes the profile's
+// Agent credential. Only an Agent is asked: a bot user whose login was
+// revoked keeps its own error and remedy.
+func confirmAgentRefused(ctx context.Context, app *appctx.App, kind, name string) bool {
+	if kind != setup.KindAgent {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	refused, _ := agentCredentialRefused(ctx, app, name)
+	return refused
+}
+
+// feedAuthorizationFailed reports whether err is the event feed ending on
+// repeated authorization failures.
+func feedAuthorizationFailed(err error) bool {
+	var terminal *eventfeed.TerminalError
+	return errors.As(err, &terminal) && terminal.Reason == eventfeed.ReasonAuthorizationFailed
+}
+
+// errAgentDisconnected says the connector stopped because its agent was
+// disconnected, in the words guided setup uses for the same thing, and how to
+// reconnect.
+func errAgentDisconnected(agent, profile string) *output.Error {
+	who := richtext.SanitizeSingleLine(agent)
+	if who == "" {
+		who = "Your agent"
+	}
+	e := output.ErrAuth(who + " was disconnected in Basecamp, or connected on another computer")
+	e.Hint = "Reconnect it: basecamp connect setup -P " + richtext.ShellQuote(profile)
+	return e
 }
 
 // connectSinceOverride is the feed position --since asks for. Zero is the
