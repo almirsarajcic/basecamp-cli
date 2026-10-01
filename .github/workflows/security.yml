@@ -3,8 +3,10 @@ name: Security
 on:
   push:
     branches: [main]
+  # Every pull request, not only those targeting main: a stacked pull
+  # request opened against its parent branch is exactly the one that
+  # most needs checking, and it was getting none.
   pull_request:
-    branches: [main]
   schedule:
     # Weekly scan on Monday at 6am UTC
     - cron: '0 6 * * 1'
@@ -68,7 +70,7 @@ jobs:
           output: 'trivy-results.sarif'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         if: always()
         continue-on-error: true  # Requires GitHub Advanced Security
         with:
@@ -118,7 +120,7 @@ jobs:
             gosec-results.sarif > tmp.sarif && mv tmp.sarif gosec-results.sarif
 
       - name: Upload gosec scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         if: always()
         continue-on-error: true  # Requires GitHub Advanced Security
         with:

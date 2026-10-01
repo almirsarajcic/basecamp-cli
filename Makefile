@@ -15,6 +15,7 @@ DATE := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # Go parameters
 GOCMD := go
+RUBY ?= ruby
 GOBUILD := $(GOCMD) build
 GOTEST := $(GOCMD) test
 GOVET := $(GOCMD) vet
@@ -376,14 +377,36 @@ replace-check:
 	fi
 	@echo "Replace check passed (no local replace directives)"
 
+# The race job is sharded, and the union check is what makes that safe: it
+# refuses unless the shards between them ran every test, once. A check that
+# cannot fail would be worse than no check, so it has its own tests.
+.PHONY: check-race-shards
+check-race-shards:
+	@scripts/race-shard-union-test.sh
+
 # Verify every leaf command is accounted for in smoke tests
 .PHONY: check-smoke-coverage
 check-smoke-coverage: build
 	@scripts/check-smoke-coverage.sh
 
+# Compile every skill-eval pattern under the engine that reads them (Ruby's
+# Onigmo). This is not the evals — those need an API key CI does not have, and
+# the Skill Evals job says so rather than running none and reporting success.
+# It is the part of them that was landing malformed and green: the Go guard in
+# internal/commands/connect_skilleval_test.go models the shape of a --serve
+# value in four of the case files and nothing else, so a mock, expect_sequence
+# or accept_response pattern that does not compile reached main unnoticed.
+#
+# Fails when ruby is missing rather than skipping: a check that cannot run and
+# reports success is the defect this target exists to close.
+.PHONY: check-eval-patterns
+check-eval-patterns:
+	@command -v $(RUBY) >/dev/null || (echo "Install ruby: the skill-eval patterns are Ruby regexes and cannot be compiled without it" && exit 1)
+	@$(RUBY) scripts/check-eval-patterns.rb
+
 # Run all checks (local CI gate)
 .PHONY: check
-check: fmt-check vet lint lint-actions test test-e2e check-naming check-surface check-skill-drift check-bare-groups check-lint-lockstep check-smoke-coverage provenance-check tidy-check
+check: fmt-check vet lint lint-actions test test-e2e test-sync-skills check-naming check-surface check-skill-drift test-skill-drift check-bare-groups check-lint-lockstep check-smoke-coverage check-eval-patterns check-race-shards provenance-check tidy-check
 
 # Lint GitHub Actions workflows (requires actionlint + zizmor)
 .PHONY: lint-actions
@@ -457,6 +480,12 @@ check-surface-compat: build
 check-skill-drift:
 	@scripts/check-skill-drift.sh
 	@scripts/check-skill-drift.sh skills/basecamp-doctor/SKILL.md
+	@scripts/check-skill-drift.sh skills/basecamp-connect/SKILL.md
+
+# Verify the skill drift check itself: what it accepts, and what it refuses
+.PHONY: test-skill-drift
+test-skill-drift:
+	@scripts/test-skill-drift.sh
 
 # Verify group commands show help bare (no RunE on parents with subcommands)
 .PHONY: check-bare-groups
@@ -555,6 +584,7 @@ tools:
 .PHONY: skill-eval
 skill-eval:
 	$(MAKE) -C skill-evals eval
+	$(MAKE) -C skill-evals eval-connect
 
 # Sync skills to basecamp/skills distribution repo
 # Usage: make sync-skills TAG=v1.2.3
@@ -562,6 +592,11 @@ skill-eval:
 sync-skills:
 	@test -n "$(TAG)" || (echo "Usage: make sync-skills TAG=v1.2.3" && exit 1)
 	RELEASE_TAG=$(TAG) SOURCE_SHA=$$(git rev-parse HEAD) DRY_RUN=local scripts/sync-skills.sh
+
+# Run the skills sync against a throwaway basecamp/skills, as two CLIs publishing in turn
+.PHONY: test-sync-skills
+test-sync-skills:
+	EXPECTED_SOURCE=basecamp-cli scripts/test-sync-skills.sh
 
 # Sync skills (dry-run against real target repo)
 # Usage: make sync-skills-remote TAG=v1.2.3 SKILLS_TOKEN=ghp_...
@@ -592,6 +627,7 @@ help:
 	@echo "  coverage         Run tests with coverage and open in browser"
 	@echo "  record-cassettes Record happy-path cassettes (TOKEN+TARGET+ACCOUNT+PROJECT)"
 	@echo "  smoke            Run pre-release smoke suite (BASECAMP_TOKEN=...)"
+	@echo "  check-race-shards Test the race shards' union check"
 	@echo "  qa-report        Show QA coverage report from smoke traces"
 	@echo ""
 	@echo "Performance:"
@@ -615,6 +651,7 @@ help:
 	@echo "  update-surface  Regenerate committed .surface from the command tree"
 	@echo "  check-surface-diff  Compare CLI surface snapshots (fails on removals)"
 	@echo "  check-skill-drift  Verify skill references match CLI surface"
+	@echo "  test-skill-drift  Run the skill drift check against its own fixtures"
 	@echo ""
 	@echo "Dependencies:"
 	@echo "  update-nix-hash   Recompute Nix vendorHash via Docker"
@@ -647,6 +684,7 @@ help:
 	@echo ""
 	@echo "Skills:"
 	@echo "  sync-skills         Local dry-run of skill sync (TAG=v1.2.3)"
+	@echo "  test-sync-skills    Run the skills sync as two CLIs against a throwaway target"
 	@echo "  sync-skills-remote  Remote dry-run (TAG=v1.2.3 SKILLS_TOKEN=...)"
 	@echo ""
 	@echo "  help           Show this help"

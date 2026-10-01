@@ -222,6 +222,26 @@ an envelope with the profile, account, identity and person, `oauth_type`,
 `null` when it reports none). A token has no refresh token, so near a reported
 expiry the CLI refuses it and asks for a fresh import.
 
+### Agents
+
+A Basecamp agent is a principal with no person behind it, so it has no browser
+to sign in with and is granted no refresh token. It authenticates with the
+OAuth `client_credentials` grant instead: its client id and secret mint a
+short-lived self-token, and the CLI mints another whenever that one nears
+expiry. The client secret is read from stdin (never an argument) and stored
+with the token it mints — in the OS keyring where one is available — because
+the client, not a refresh token, is what survives an expiry:
+
+```bash
+op read "op://Vault/Item/credential" | basecamp auth login --with-client-credentials --client-id <id> -P agent --account 999
+```
+
+The login mints once, which is what proves the client id and secret: a refused
+mint stores nothing. `--account` is required when the profile does not exist
+yet. `basecamp auth logout` forgets the credential; there is no useful
+revocation, since the same client would mint another — rotate the client
+secret in Basecamp to end an agent's access.
+
 ### Multiple Identities
 
 Use named profiles when the same machine or agent gateway needs more than one Basecamp identity. Each profile has its own stored OAuth credentials and can be selected per command:
@@ -310,14 +330,26 @@ server:
 claude mcp add basecamp -- basecamp mcp
 ```
 
-Fifteen domain tools (`basecamp_projects`, `basecamp_todos`, `basecamp_cards`,
+Sixteen domain tools (`basecamp_projects`, `basecamp_todos`, `basecamp_cards`,
 `basecamp_messages`, `basecamp_campfires`, `basecamp_boosts`,
 `basecamp_schedules`, `basecamp_files`, `basecamp_people`,
 `basecamp_automation`, `basecamp_reports`, `basecamp_everything`,
-`basecamp_clientside`, `basecamp_forwards`, `basecamp_account`) cover the
-Basecamp API, scoped to the configured account. Each tool takes
-`{"action": "...", "params": {...}}` and serves per-action schemas through
-its `describe` action.
+`basecamp_clientside`, `basecamp_forwards`, `basecamp_account`,
+`basecamp_recordings`) cover the Basecamp API, scoped to the configured
+account. Each tool takes `{"action": "...", "params": {...}}` and serves
+per-action schemas through its `describe` action.
+
+Two composite helpers ride on that surface, shared with basecamp-mcp-server
+through basecamp-sdk so both servers answer the same way.
+`basecamp_recordings summarize` resolves the pointer an account event feed
+row carries — bucket id, recording id, and the event or recording type —
+into one compact projection, discovering a chat line's Campfire on the way.
+It is not backed by any single Basecamp endpoint, and the catalogue says so:
+it carries no method and no path, where every model operation carries both,
+and its summary opens with "Synthetic:". `basecamp_messages create_comment`
+is an ordinary endpoint with a synthetic parameter: `mentions`, a list of
+person ids expanded client-side into the attachment markup Basecamp reads as
+a mention.
 
 ```bash
 basecamp mcp --read-only                 # serve only read-only actions

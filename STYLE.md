@@ -42,8 +42,22 @@ existing group noun is not allowed.
 
 Shortcut commands without a sibling plural group — `search`, `url`,
 `recordings`, `timesheet`, `assignments`, `notifications`, `setup`, `completion`
-— may have both `RunE` and subcommands. `scripts/check-bare-groups.sh` enforces
-this with an allowlist.
+— may have both `RunE` and subcommands.
+
+`events` is the one plural noun in that set. `events <id|url>` reads a single
+recording's change history and predates the account-wide event feed that
+`events poll` and `events ticket` now serve, so the bare form stays an action
+rather than becoming a group: turning it into one would break every existing
+`basecamp events <id>` invocation to gain nothing.
+
+`connect` is the other exception. The spec names the connector's run as the bare
+`basecamp connect -P <agent>`, a long-running foreground command in the grain of
+`basecamp mcp`, with `setup` beside it as the one-off that prepares it. Making the
+run a `connect run` subcommand would put a verb under a command that is already
+the verb.
+
+`scripts/check-bare-groups.sh` enforces this with an allowlist; a command added
+there belongs in this section too, with the reason it is an exception.
 
 ## File Organization
 

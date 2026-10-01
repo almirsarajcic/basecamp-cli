@@ -171,6 +171,9 @@ func TestIsTrustedBasecampHost(t *testing.T) {
 		// Production hosts are always trusted.
 		{"production web host", "https://3.basecamp.com/99/buckets/1/chats/2/lines/3", prodBaseURL, true},
 		{"production api host", "https://3.basecampapi.com/99/chats/2/lines/3", prodBaseURL, true},
+		{"current production web host", "https://app.basecamp.com/99/buckets/1/chats/2/lines/3", prodBaseURL, true},
+		{"current production api host", "https://api.basecamp.com/99/chats/2/lines/3", prodBaseURL, true},
+		{"look-alike of the current web host", "https://app.basecamp.com.evil.example/99/buckets/1/chats/2/lines/3", prodBaseURL, false},
 
 		// Host comparison is case-insensitive (hostnames are).
 		{"uppercased production host", "https://3.BASECAMP.com/99/buckets/1/chats/2/lines/3", prodBaseURL, true},
@@ -202,4 +205,55 @@ func TestIsTrustedBasecampHost(t *testing.T) {
 			assert.Equal(t, tt.expected, IsTrustedBasecampHost(tt.rawURL, tt.cfgBaseURL))
 		})
 	}
+}
+
+// pinInteractiveHost clears every signal HeadlessReason reads so a test
+// observes the interactive answer regardless of the machine it runs on (CI
+// exports CI=true and Linux runners have no display).
+func pinInteractiveHost(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "CI"} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("DISPLAY", ":0")
+	t.Setenv("WAYLAND_DISPLAY", "")
+}
+
+func TestHeadlessReason(t *testing.T) {
+	pinInteractiveHost(t)
+	assert.Empty(t, HeadlessReason(), "a display and no SSH or CI is interactive")
+
+	t.Run("ssh", func(t *testing.T) {
+		pinInteractiveHost(t)
+		t.Setenv("SSH_TTY", "/dev/pts/0")
+		assert.Equal(t, "SSH session", HeadlessReason())
+	})
+	t.Run("ci", func(t *testing.T) {
+		for _, v := range []string{"true", "1", "YES"} {
+			pinInteractiveHost(t)
+			t.Setenv("CI", v)
+			assert.Equal(t, "CI environment", HeadlessReason(), "CI=%s", v)
+		}
+		pinInteractiveHost(t)
+		t.Setenv("CI", "false")
+		assert.Empty(t, HeadlessReason(), "CI=false is not a CI runner")
+	})
+	t.Run("ssh outranks ci", func(t *testing.T) {
+		pinInteractiveHost(t)
+		t.Setenv("CI", "true")
+		t.Setenv("SSH_CLIENT", "10.0.0.1 12345 22")
+		assert.Equal(t, "SSH session", HeadlessReason())
+	})
+	t.Run("no display", func(t *testing.T) {
+		pinInteractiveHost(t)
+		t.Setenv("DISPLAY", "")
+		want := ""
+		if unixWithoutDisplay() {
+			want = "no display"
+		}
+		assert.Equal(t, want, HeadlessReason())
+
+		t.Setenv("WAYLAND_DISPLAY", "wayland-0")
+		assert.Empty(t, HeadlessReason(), "a Wayland display is a display")
+	})
 }

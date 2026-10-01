@@ -1,0 +1,1113 @@
+package connector
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"modernc.org/sqlite" // database/sql driver "sqlite", pure Go: no cgo on any of the five release targets.
+	sqlite3 "modernc.org/sqlite/lib"
+
+	"github.com/basecamp/basecamp-cli/internal/connector/setup"
+)
+
+// isInMemory reports a path SQLite would read as its in-memory database
+// rather than a file.
+func isInMemory(path string) bool {
+	trimmed := strings.TrimPrefix(path, "file:")
+	return trimmed == ":memory:" || strings.HasPrefix(trimmed, ":memory:?") || trimmed == ""
+}
+
+// RecordState is where an event sits in the ledger's lifecycle.
+//
+// Intake only ever writes StateSeen. The rest of the vocabulary is declared
+// here because the states are one lifecycle, and a store that cannot name the
+// state a later card writes cannot recover it on start either.
+type RecordState string
+
+const (
+	// StateSeen is a pointer intake wrote and nothing has judged yet. Every
+	// seen record re-runs the gate on start.
+	StateSeen RecordState = "seen"
+	// StateAdmitted passed the gate and awaits dispatch.
+	StateAdmitted RecordState = "admitted"
+	// StateQueued waits behind another event on its conversation.
+	StateQueued RecordState = "queued"
+	// StateBlocked is retained and retried: a reason, never a transport
+	// failure dressed up as a verdict. Retried by the intake sweep, on
+	// admission.NextBlockedRetry's schedule (Intake.sweepBlockedRetries), and
+	// by a person at any time with `basecamp connect redispatch <id>`.
+	StateBlocked RecordState = "blocked"
+	// StateDispatched was handed to a worker.
+	StateDispatched RecordState = "dispatched"
+	// StateCompleted is terminal with an outcome.
+	StateCompleted RecordState = "completed"
+	// StateDiscarded is terminal with a verified verdict.
+	StateDiscarded RecordState = "discarded"
+	// StateHeld waits for a person. A record tagged for review by a hold
+	// becomes held where it would have waited for a worker, and only a
+	// person's redispatch or discard moves it on. It keeps its snapshot.
+	StateHeld RecordState = "held"
+)
+
+// Lane names which lane first served an event. It is diagnostic: dedupe is by
+// id, and the same event ordinarily arrives on both.
+type Lane string
+
+const (
+	// LaneLive is the WebSocket.
+	LaneLive Lane = "live"
+	// LanePoll is the catch-up or streaming poll walk.
+	LanePoll Lane = "poll"
+	// LaneRepair is a repair walk after an overflow — its own cursor, never
+	// the feed's.
+	LaneRepair Lane = "repair"
+)
+
+// Ledger is the connector's durable memory: the dedupe authority, the feed
+// position, and the record of what was lost.
+//
+// It is a SQLite file rather than a set in memory because every promise the
+// connector makes about a crash rests on the answer to "have I seen this id
+// before?" surviving the crash.
+type Ledger struct {
+	db *sql.DB
+	// file is this process's entry for the ledger file, shared with every
+	// other Ledger open on it; closed releases it once.
+	file   *openLedgerFile
+	closed sync.Once
+	now    func() time.Time
+	hooks  Hooks
+	// blockedScheduleReads counts the reads the retry sweep makes against the
+	// schedule to prune its claims. The sweep must make none when it holds no
+	// claims: the read it used to make was over the whole live backlog, and a
+	// test that only checks the answer cannot see the work (Copilot on #770).
+	blockedScheduleReads atomic.Int64
+}
+
+// OpenLedger opens (creating if absent) the ledger at path and brings its
+// schema up to date.
+func OpenLedger(path string) (*Ledger, error) {
+	return openLedger(context.Background(), path, true)
+}
+
+// ErrLedgerSchema is a ledger whose schema is not the one this binary writes.
+var ErrLedgerSchema = errors.New("the connector ledger's schema is not the version this basecamp writes")
+
+// OpenExistingLedger opens a ledger the connector already created, for a
+// process that reads and reports into it rather than owns it — a worker's
+// MCP server. It never creates the file and never migrates: a different
+// basecamp binary started as a worker must not change the schema under the
+// connector that holds it, so a ledger at any other schema version is
+// refused.
+//
+// Neither the privacy check nor SQLite may create the file on this path: the
+// check only inspects, and the database is opened with mode=rw, so a ledger
+// removed at any moment is an error rather than a new empty one.
+func OpenExistingLedger(ctx context.Context, path string) (*Ledger, error) {
+	return openLedger(ctx, path, false)
+}
+
+// ledgerDSN is the SQLite URI for the ledger at path. owner opens it the way
+// the connector does, creating it when absent; otherwise mode=rw makes SQLite
+// refuse a file that is not there.
+//
+// _txlock=immediate takes the write lock when a transaction opens rather than
+// on its first write. Without it two connectors racing on one file can both
+// start, both read, and one is refused at COMMIT with the work already done.
+func ledgerDSN(path string, owner bool) string {
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_txlock=immediate"
+	if !owner {
+		dsn += "&mode=rw"
+	}
+	return dsn
+}
+
+// openLedger opens the ledger; owner is the connector itself, which creates
+// and migrates it. Any other opener does neither.
+func openLedger(ctx context.Context, path string, owner bool) (*Ledger, error) {
+	if path == "" {
+		return nil, errors.New("connector: ledger path is required")
+	}
+	if isInMemory(path) {
+		// SQLite's in-memory URI accepts every write and loses it on close.
+		// The ledger's whole promise is that a crash is a delay.
+		return nil, fmt.Errorf("connector: ledger path %q names SQLite's in-memory database, which is not durable", path)
+	}
+	if strings.ContainsAny(path, "?#%") {
+		// The driver reads the path as a URI; these would be taken as its
+		// query, fragment or an escape, and open some other file.
+		return nil, fmt.Errorf("connector: ledger path %q contains a character the SQLite URI cannot carry (?, # or %%)", path)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("connector: ledger path %q: %w", path, err)
+	}
+	// The descriptor check runs for the first Ledger on this file and never
+	// while another one is open: its close would drop that one's locks.
+	file := claimLedger(abs)
+	if file.key != abs {
+		releaseLedger(file)
+		return nil, fmt.Errorf("connector: %s and %s are one file: %w", abs, file.key, ErrLedgerUnderAnotherName)
+	}
+	if err := checkLedgerFile(file, path, abs, owner); err != nil {
+		releaseLedger(file)
+		return nil, err
+	}
+
+	db, err := sql.Open("sqlite", ledgerDSN(path, owner))
+	if err != nil {
+		releaseLedger(file)
+		return nil, fmt.Errorf("connector: open ledger: %w", err)
+	}
+	// One writer. SQLite serializes writers anyway, and a pool merely turns
+	// that serialization into SQLITE_BUSY under load.
+	db.SetMaxOpenConns(1)
+
+	l := &Ledger{db: db, file: file, now: time.Now}
+	if owner {
+		if err := retryBusy(func() error { return l.migrate(ctx) }); err != nil {
+			_ = l.Close()
+			return nil, err
+		}
+	} else {
+		var version int
+		err := retryBusy(func() error {
+			var err error
+			version, err = l.schemaVersion(ctx)
+			return err
+		})
+		if err != nil {
+			_ = l.Close()
+			return nil, fmt.Errorf("connector: read ledger schema: %w", err)
+		}
+		if version != len(migrations) {
+			_ = l.Close()
+			return nil, fmt.Errorf("connector: ledger at schema %d, this basecamp writes %d: %w", version, len(migrations), ErrLedgerSchema)
+		}
+	}
+	// The WAL and shared-memory sidecars exist now and were created under the
+	// process umask. The private directory already keeps other users out;
+	// tightening them too costs nothing.
+	for _, sidecar := range []string{path + "-wal", path + "-shm"} {
+		if err := os.Chmod(sidecar, 0o600); err != nil && !os.IsNotExist(err) {
+			_ = l.Close()
+			return nil, fmt.Errorf("connector: secure ledger sidecar: %w", err)
+		}
+	}
+	return l, nil
+}
+
+// retryBusy retries fn while SQLite reports the database busy, for up to five
+// seconds.
+//
+// The busy timeout covers ordinary contention, but not all of it: switching a
+// fresh database into WAL mode takes a lock the busy handler is not consulted
+// for, so two processes opening one new ledger at once — `status` beside a
+// starting connector — can get SQLITE_BUSY immediately. The migration is
+// idempotent, so trying again is safe.
+func retryBusy(fn func() error) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := fn()
+		if err == nil || !isBusy(err) || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func isBusy(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	// The primary result code, without the extended bits.
+	switch sqliteErr.Code() & 0xff {
+	case sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED:
+		return true
+	}
+	return false
+}
+
+// securePath makes the ledger private or refuses it.
+//
+// The ledger holds feed positions — signed tokens that resume the account's
+// feed — and every event's metadata, so it is a credential file and is
+// treated as one. The check is the same one the connector's trust file and
+// instance lock get: every directory on the way must be this user's own and
+// unwritable by anyone else, and the ledger itself is opened without
+// following symlinks and inspected through that descriptor rather than by
+// name. Validating the name would validate whatever the name pointed at when
+// it was asked, which is not necessarily what SQLite then opens.
+//
+// A file or directory that already exists with looser permissions is refused
+// rather than tightened: something else chose those permissions, and silently
+// changing them could break it or hide that the ledger was exposed.
+//
+// The check cannot be made on a platform without POSIX owners and modes, and
+// a ledger whose privacy cannot be established is refused there rather than
+// opened — the same way setup refuses to write a trust file it cannot vouch
+// for.
+func securePath(path string, create bool) error {
+	check := setup.CheckPrivateFile
+	if create {
+		check = setup.EnsurePrivateFile
+	}
+	if err := check(path); err != nil {
+		return fmt.Errorf("connector: secure the ledger: %w", err)
+	}
+	// One rule of the ledger's own, beyond what a trust file needs: its
+	// directory must be 0700, not merely unwritable by others. SQLite writes
+	// -wal and -shm beside the database, and a directory other users can read
+	// is one whose entries they can list. The directory is already known not
+	// to be a symlink, so Lstat here inspects the directory itself.
+	dir := filepath.Dir(path)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("connector: inspect ledger directory: %w", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("connector: ledger directory %s is readable by other users (mode %04o); it must be 0700", dir, perm)
+	}
+	return nil
+}
+
+// Close releases the ledger's handle. A second Close is harmless: the file is
+// released once, so a defensive extra call cannot take the entry away from
+// another Ledger still holding the same file.
+func (l *Ledger) Close() error {
+	// The database first, the entry after: between the two, an open racing
+	// this close must still find the entry, or its check would open the file
+	// while this connection still holds locks on it.
+	err := l.db.Close()
+	l.closed.Do(func() { releaseLedger(l.file) })
+	return err
+}
+
+// Opening one ledger file more than once in a process, safely.
+//
+// The privacy check opens the file and closes it, and POSIX drops every lock
+// a process holds on a file when any descriptor for it is closed — including
+// the locks SQLite is holding on another connection. So the check runs
+// exactly once per file per process, while nothing else has it open. A later
+// Ledger on the same file (a status read beside a running connector, a
+// promote) is verified instead against what that check established: the same
+// file, still this user's own, still owner-only, in a directory that is
+// still 0700. Stat never opens anything, so it takes no locks away.
+//
+// ErrLedgerNotTheSameFile is a second open of a path that no longer names the
+// file the check passed.
+var ErrLedgerNotTheSameFile = errors.New("the ledger path no longer names the file this process checked")
+
+// ErrLedgerUnderAnotherName is an open of a file this process already has
+// open under a different path — a hardlink, or a route through a symlink.
+// SQLite names its write-ahead log and shared-memory files after the path it
+// was given, so one file opened under two names is two different logs for one
+// database. It is refused here, before the check that would open the file and
+// drop the live handle's locks.
+var ErrLedgerUnderAnotherName = errors.New("this process already has this ledger open under another name")
+
+var openLedgers struct {
+	sync.Mutex
+	files map[string]*openLedgerFile
+}
+
+type openLedgerFile struct {
+	// key is this entry's key in the map, so it can be released by entry.
+	key  string
+	refs int
+	// mu serializes the check itself, so opens that race each other on a
+	// fresh file do not verify against a check that has not run yet.
+	mu sync.Mutex
+	// info is the file this entry is for, recorded when it was claimed, so
+	// another name for the same file finds this entry even before the check
+	// has run. It is nil only when the file did not exist yet.
+	info os.FileInfo
+	// checked says the descriptor check has run for this file; info is then
+	// what that check saw.
+	checked bool
+}
+
+// securePathRuns counts the checks that open the file. A test pins that a
+// second Ledger on a live file runs none.
+var securePathRuns atomic.Int64
+
+// claimLedger records this process opening path and returns that file's
+// entry, whose lock the caller takes to check it.
+//
+// The entry is found by what the path names, not by how it is spelled: a
+// hardlink, a symlink or another route to the same file must meet the same
+// entry, because the check this guards opens and closes the file itself.
+func claimLedger(path string) *openLedgerFile {
+	openLedgers.Lock()
+	defer openLedgers.Unlock()
+	if openLedgers.files == nil {
+		openLedgers.files = map[string]*openLedgerFile{}
+	}
+	file := openLedgers.files[path]
+	if file == nil {
+		// Recorded at claim time, not at check time: an aliased open that
+		// arrives while the first one's check is still running must find this
+		// entry, since that check is the file-opening one.
+		info, err := os.Lstat(path)
+		if err == nil {
+			for _, open := range openLedgers.files {
+				if open.info != nil && os.SameFile(open.info, info) {
+					file = open
+					break
+				}
+			}
+		}
+		if file == nil {
+			file = &openLedgerFile{key: path, info: info}
+			openLedgers.files[path] = file
+		}
+	}
+	file.refs++
+	return file
+}
+
+func releaseLedger(file *openLedgerFile) {
+	openLedgers.Lock()
+	defer openLedgers.Unlock()
+	if file.refs--; file.refs <= 0 {
+		delete(openLedgers.files, file.key)
+	}
+}
+
+// checkLedgerFile runs the descriptor check once per file, and holds every
+// later open against what it established.
+func checkLedgerFile(file *openLedgerFile, path, abs string, owner bool) error {
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	openLedgers.Lock()
+	checked, info := file.checked, file.info
+	openLedgers.Unlock()
+	if checked {
+		return verifySameFile(abs, info)
+	}
+	securePathRuns.Add(1)
+	if err := securePath(path, owner); err != nil {
+		return err
+	}
+	// The check may have created the file, so what it saw is recorded now —
+	// under the map's own lock, because that is where the alias scan reads it.
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return fmt.Errorf("connector: inspect the ledger: %w", err)
+	}
+	recordCheckedFile(file, info)
+	return nil
+}
+
+// recordCheckedFile publishes what the descriptor check saw, under the lock
+// the alias scan reads it with.
+func recordCheckedFile(file *openLedgerFile, info os.FileInfo) {
+	openLedgers.Lock()
+	defer openLedgers.Unlock()
+	file.info, file.checked = info, true
+}
+
+// ownedByThisUser and sameOwner read owners; see owner_unix.go.
+//
+// verifySameFile holds a second open to what the first one's check
+// established, without opening anything.
+func verifySameFile(path string, checked os.FileInfo) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("connector: secure the ledger: %w", err)
+	}
+	// The first check established whose file it is. Ownership can change
+	// under an open handle, and a ledger that is no longer this user's own —
+	// or no longer the owner the check passed — is not one to read.
+	if !ownedByThisUser(info) || !sameOwner(info, checked) {
+		return fmt.Errorf("connector: secure the ledger: %s is no longer owned by the user the check passed", path)
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(info, checked) {
+		return fmt.Errorf("connector: secure the ledger: %s: %w", path, ErrLedgerNotTheSameFile)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("connector: secure the ledger: %s can be read by other users (mode %04o)", path, perm)
+	}
+	// The whole chain, not only the last directory: a path later redirected
+	// through a writable or foreign-owned ancestor is not the path the first
+	// check passed. Directories are vetted without opening the ledger, which
+	// is the one thing this path must not do.
+	dir := filepath.Dir(path)
+	if err := setup.CheckPrivateDir(dir); err != nil {
+		return fmt.Errorf("connector: secure the ledger: %w", err)
+	}
+	info, err = os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("connector: inspect ledger directory: %w", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("connector: ledger directory %s is readable by other users (mode %04o); it must be 0700", dir, perm)
+	}
+	return nil
+}
+
+// migrations are applied in order, each exactly once. A migration is never
+// edited after it ships: the ledger outlives the binary that created it.
+var migrations = []string{
+	`
+CREATE TABLE events (
+  id                 INTEGER PRIMARY KEY,
+  state              TEXT    NOT NULL,
+  reason             TEXT    NOT NULL DEFAULT '',
+  lane               TEXT    NOT NULL,
+  event_type         TEXT    NOT NULL,
+  kind               TEXT    NOT NULL,
+  action             TEXT    NOT NULL,
+  bucket_id          INTEGER NOT NULL,
+  creator_id         INTEGER NOT NULL,
+  performed_by_id    INTEGER,
+  recording_id       INTEGER NOT NULL,
+  details            BLOB,
+  actor_type         TEXT    NOT NULL DEFAULT '',
+  visible_to_clients INTEGER,
+  created_at         TEXT    NOT NULL,
+  seen_at            TEXT    NOT NULL,
+  updated_at         TEXT    NOT NULL,
+  content_dropped    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX events_state_id ON events (state, id);
+
+CREATE TABLE checkpoints (
+  flat_key            TEXT PRIMARY KEY,
+  lineage             TEXT NOT NULL,
+  position            TEXT NOT NULL,
+  last_poll_served_id INTEGER NOT NULL DEFAULT 0,
+  updated_at          TEXT NOT NULL
+);
+CREATE INDEX checkpoints_lineage ON checkpoints (lineage);
+
+CREATE TABLE losses (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  detected_at   TEXT    NOT NULL,
+  dropped_count INTEGER NOT NULL,
+  repair_since  INTEGER NOT NULL,
+  repair_cursor TEXT    NOT NULL DEFAULT '',
+  deadline_at   TEXT    NOT NULL,
+  resolved_at   TEXT
+);
+
+CREATE TABLE loss_ids (
+  loss_id  INTEGER NOT NULL REFERENCES losses (id) ON DELETE CASCADE,
+  event_id INTEGER NOT NULL,
+  state    TEXT    NOT NULL,
+  PRIMARY KEY (loss_id, event_id)
+);
+CREATE INDEX loss_ids_event ON loss_ids (event_id, state);
+
+CREATE TABLE gaps (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  detected_at    TEXT    NOT NULL,
+  class          TEXT    NOT NULL,
+  epoch_after_id INTEGER,
+  entry_class    TEXT    NOT NULL DEFAULT '',
+  note           TEXT    NOT NULL DEFAULT ''
+);
+`,
+	// Migration 2. A loss is repaired under the filter set it was recorded
+	// with: a connector restarted with different filters must not walk the
+	// wrong lane for it and condemn events the original filters would have
+	// served. Migrations only ever append, so an existing ledger takes this
+	// one and its open losses carry an empty set, which reads as "the
+	// connector's own".
+	`ALTER TABLE losses ADD COLUMN filters TEXT NOT NULL DEFAULT ''`,
+	// Migration 3. Terminal means terminal, in the database and not only in
+	// the code that writes to it. A completed or discarded record that could
+	// be moved back into the working states could be dispatched a second
+	// time, or — once its payload has been dropped and only the tombstone
+	// remains — requeued as work with nothing in it. The Go side refuses
+	// every edge the lifecycle does not have; this refuses the two that
+	// matter to anything that ever writes to this file.
+	`
+CREATE TRIGGER events_terminal_is_terminal
+BEFORE UPDATE OF state ON events
+WHEN OLD.state IN ('completed', 'discarded') AND NEW.state <> OLD.state
+BEGIN
+  SELECT RAISE(ABORT, 'a terminal record cannot change state');
+END;
+`,
+	// Migration 4. What admission decides is written onto the record it
+	// decided, in the transaction that decides it.
+	//
+	// revision is the guard on that write: a decision carries the revision
+	// the record was loaded at, and applies only while the record is still
+	// there, so one event gets one verdict however many fetches decide it and
+	// an older decision never overwrites a newer one. Every state change bumps
+	// it, not only admission's.
+	//
+	// decided_at is when the latest verdict was written, blocked_at when the
+	// record entered its current run of blocked verdicts (the retry window
+	// counts from it), and retry_at a throttled verdict's server deadline.
+	// The rest is the verdict itself — what dispatch starts a task from, and
+	// what a blocked(no_route) record's holding reply needs. snapshot is the
+	// recording's content as admission read it. Only an admitted verdict
+	// writes one, whether the ledger writes it as admitted or as queued; a
+	// record keeps it through dispatch and completion until retention drops
+	// it, and loses it on any move to blocked or discarded. Nothing else in
+	// the ledger is content.
+	//
+	// Nothing has shipped that wrote a version 3 ledger, but a migration is
+	// how the schema changes regardless: the next time something has, this is
+	// the path that has to work.
+	`
+ALTER TABLE events ADD COLUMN revision           INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE events ADD COLUMN decided_at         TEXT;
+ALTER TABLE events ADD COLUMN blocked_at         TEXT;
+ALTER TABLE events ADD COLUMN retry_at           TEXT;
+ALTER TABLE events ADD COLUMN trigger_name       TEXT    NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN acknowledge        INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE events ADD COLUMN conversation_key   TEXT    NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN reply_kind         TEXT    NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN reply_recording_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE events ADD COLUMN routed             INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE events ADD COLUMN route              TEXT    NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN class              TEXT    NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN recording_url      TEXT    NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN requester_id       INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE events ADD COLUMN snapshot           BLOB;
+CREATE INDEX events_conversation ON events (conversation_key, state);
+`,
+	// Migration 5. The worker's side of a dispatch: the task a worker's token
+	// names, and each event's delivery state on it.
+	//
+	// These are the columns the basecamp_connect domain reads and writes and
+	// nothing more. The dispatcher's attempts, deadlines and working
+	// directories extend these tables rather than replace them.
+	//
+	// A task keeps a hash of its token, never the token: the ledger is a
+	// file other processes open, and the token is what binds a worker to its
+	// task. superseded_at is set when a redispatch replaces the worker, and a
+	// superseded token is refused.
+	//
+	// delivery is admitted → exposed → delivered → completed and never goes
+	// back, held by the trigger as the events lifecycle is. guard is the
+	// thirty-second acknowledgement guard: '' where none applies, armed until
+	// get_dispatch cancels it or the connector fires it, and settled once.
+	// A record a worker was handed leaves dispatched only to completed. The
+	// whole lifecycle these enforce is written down at the top of
+	// ledger_dispatch.go.
+	//
+	// An event is on at most one live task. retired_at is set on every row of
+	// a task when it is superseded, and the unique index over the rows not
+	// retired is what refuses a second live task for the same event — in the
+	// database, so a dispatcher retrying a launch cannot hand one event to two
+	// workers whatever order its writes land in.
+	`
+CREATE TABLE tasks (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_sha256  TEXT NOT NULL UNIQUE,
+  created_at    TEXT NOT NULL,
+  superseded_at TEXT
+);
+
+CREATE TABLE task_events (
+  task_id      INTEGER NOT NULL REFERENCES tasks (id),
+  event_id     INTEGER NOT NULL REFERENCES events (id),
+  -- The conversation the event is on, copied from the record when the row is
+  -- written: retention clears a terminal record's conversation_key, and a
+  -- task outlives its records' payloads, so the conversation a live task
+  -- holds has to be written where it stays readable.
+  conversation_key TEXT NOT NULL DEFAULT '',
+  delivery     TEXT    NOT NULL DEFAULT 'admitted'
+               CHECK (delivery IN ('admitted', 'exposed', 'delivered', 'completed')),
+  guard        TEXT    NOT NULL DEFAULT ''
+               CHECK (guard IN ('', 'armed', 'canceled', 'fired')),
+  exposed_at   TEXT,
+  delivered_at TEXT,
+  completed_at TEXT,
+  ack_id       INTEGER,
+  outcome      TEXT    NOT NULL DEFAULT '',
+  links        TEXT    NOT NULL DEFAULT '[]',
+  reply_id     INTEGER,
+  retired_at   TEXT,
+  pulled_at    TEXT,
+  withdrawn_at TEXT,
+  PRIMARY KEY (task_id, event_id)
+);
+
+CREATE UNIQUE INDEX task_events_one_live_task ON task_events (event_id) WHERE retired_at IS NULL;
+CREATE INDEX task_events_event ON task_events (event_id, delivery);
+CREATE INDEX task_events_conversation ON task_events (conversation_key) WHERE retired_at IS NULL;
+
+CREATE TRIGGER tasks_supersession_is_final
+BEFORE UPDATE OF superseded_at ON tasks
+WHEN OLD.superseded_at IS NOT NULL AND NEW.superseded_at IS NOT OLD.superseded_at
+BEGIN
+  SELECT RAISE(ABORT, 'a superseded task stays superseded');
+END;
+
+-- Retirement is not a second step anyone can forget or skip: superseding a
+-- task retires its events in the same write, so a task's token and its rows
+-- stop being live together.
+CREATE TRIGGER tasks_supersession_retires_its_events
+AFTER UPDATE OF superseded_at ON tasks
+WHEN NEW.superseded_at IS NOT NULL AND OLD.superseded_at IS NULL
+BEGIN
+  UPDATE task_events SET retired_at = NEW.superseded_at
+  WHERE task_id = NEW.id AND retired_at IS NULL;
+END;
+
+CREATE TRIGGER task_events_retirement_follows_supersession
+BEFORE UPDATE OF retired_at ON task_events
+WHEN NEW.retired_at IS NOT OLD.retired_at AND (
+  OLD.retired_at IS NOT NULL
+  OR NEW.retired_at IS NULL
+  OR NOT EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id AND superseded_at IS NOT NULL))
+BEGIN
+  SELECT RAISE(ABORT, 'a task event is retired when its task is superseded, once');
+END;
+
+CREATE TRIGGER task_events_are_not_deleted
+BEFORE DELETE ON task_events
+BEGIN
+  SELECT RAISE(ABORT, 'a task event is retired, never deleted');
+END;
+
+CREATE TRIGGER task_events_withdrawal_is_for_a_failed_spawn
+BEFORE UPDATE OF withdrawn_at ON task_events
+WHEN NEW.withdrawn_at IS NOT OLD.withdrawn_at AND (
+  OLD.withdrawn_at IS NOT NULL
+  OR OLD.delivery <> 'exposed'
+  OR OLD.pulled_at IS NOT NULL
+  -- Nor can one statement withdraw and pull, or withdraw and move the row.
+  OR NEW.pulled_at IS NOT NULL
+  OR NEW.delivery <> 'exposed'
+  OR NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.id = OLD.task_id AND tasks.superseded_at IS NOT NULL)
+  OR EXISTS (SELECT 1 FROM task_events live WHERE live.event_id = OLD.event_id AND live.retired_at IS NULL))
+BEGIN
+  SELECT RAISE(ABORT, 'only a launch exposure no worker pulled, on a superseded task and no live one, is withdrawn, and only once');
+END;
+
+CREATE TRIGGER task_events_pull_is_recorded_once
+BEFORE UPDATE OF pulled_at ON task_events
+WHEN NEW.pulled_at IS NOT OLD.pulled_at AND (
+  OLD.pulled_at IS NOT NULL
+  OR OLD.delivery <> 'exposed'
+  OR OLD.retired_at IS NOT NULL
+  OR OLD.withdrawn_at IS NOT NULL
+  -- The same statement cannot both pull and retire or withdraw: these are a
+  -- BEFORE trigger's conditions, so the row being written is read as well.
+  OR NEW.retired_at IS NOT NULL
+  OR NEW.withdrawn_at IS NOT NULL
+  OR NEW.delivery <> 'exposed')
+BEGIN
+  SELECT RAISE(ABORT, 'a pull is recorded once, and only on a live exposure');
+END;
+
+CREATE TRIGGER task_events_withdrawn_is_final
+BEFORE UPDATE OF delivery ON task_events
+WHEN OLD.withdrawn_at IS NOT NULL AND NEW.delivery <> OLD.delivery
+BEGIN
+  SELECT RAISE(ABORT, 'a withdrawn exposure does not move');
+END;
+
+CREATE TRIGGER events_handed_work_settles_first
+BEFORE UPDATE OF state ON events
+WHEN OLD.state = 'dispatched' AND NEW.state NOT IN ('dispatched', 'completed')
+  AND EXISTS (SELECT 1 FROM task_events WHERE event_id = OLD.id AND delivery IN ('exposed', 'delivered') AND withdrawn_at IS NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'a worker was handed this event; it leaves dispatched only when completed');
+END;
+
+CREATE TRIGGER events_dispatched_while_on_a_live_task
+BEFORE UPDATE OF state ON events
+WHEN NEW.state <> OLD.state AND (
+  (NEW.state = 'dispatched'
+    AND NOT EXISTS (SELECT 1 FROM task_events WHERE event_id = OLD.id AND retired_at IS NULL))
+  OR (OLD.state = 'dispatched' AND NEW.state <> 'completed'
+    AND EXISTS (SELECT 1 FROM task_events WHERE event_id = OLD.id AND retired_at IS NULL)))
+BEGIN
+  SELECT RAISE(ABORT, 'a record is dispatched exactly while a live task carries it');
+END;
+
+-- The acknowledgement settles with the delivery: the id a worker points at is
+-- written when it acknowledges, or never.
+CREATE TRIGGER task_events_acknowledgement_settles_once
+BEFORE UPDATE OF ack_id ON task_events
+WHEN NEW.ack_id IS NOT OLD.ack_id AND (OLD.ack_id IS NOT NULL OR OLD.delivery <> 'exposed')
+BEGIN
+  SELECT RAISE(ABORT, 'an acknowledgement id is written with the acknowledgement, once');
+END;
+
+CREATE TRIGGER task_events_guard_settles_once
+BEFORE UPDATE OF guard ON task_events
+WHEN NEW.guard <> OLD.guard AND NOT (OLD.guard = 'armed' AND NEW.guard IN ('canceled', 'fired'))
+BEGIN
+  SELECT RAISE(ABORT, 'a guard only goes from armed to canceled or fired');
+END;
+
+-- What these triggers are for: holding this package's own writes, and those
+-- of a second connector on the same file, to the lifecycle. They are not a
+-- defense against raw SQL. Anyone who can run that already has write access to
+-- the operator's private ledger and could edit or replace the file; the trust
+-- boundary there is file ownership and the private-path check, not a trigger.
+CREATE TRIGGER task_events_join_live_tasks_only
+BEFORE INSERT ON task_events
+WHEN EXISTS (SELECT 1 FROM tasks WHERE id = NEW.task_id AND superseded_at IS NOT NULL)
+  OR NOT EXISTS (SELECT 1 FROM events WHERE id = NEW.event_id AND state IN ('admitted', 'queued', 'dispatched'))
+BEGIN
+  SELECT RAISE(ABORT, 'only work waiting for a worker joins a task, and only a live one');
+END;
+
+-- One live task per conversation (invariant 2), as a rule about the rows
+-- rather than about the records: two workers on one conversation would answer
+-- each other's work, and a conversation whose records have since been
+-- retained must still count.
+CREATE TRIGGER task_events_one_live_task_per_conversation
+BEFORE INSERT ON task_events
+WHEN NEW.conversation_key <> '' AND NEW.retired_at IS NULL AND EXISTS (
+  SELECT 1 FROM task_events live
+  WHERE live.conversation_key = NEW.conversation_key
+    AND live.retired_at IS NULL AND live.task_id <> NEW.task_id)
+BEGIN
+  SELECT RAISE(ABORT, 'one live task per conversation');
+END;
+
+CREATE TRIGGER task_events_conversation_does_not_move
+BEFORE UPDATE OF conversation_key ON task_events
+WHEN NEW.conversation_key <> OLD.conversation_key
+BEGIN
+  SELECT RAISE(ABORT, 'a task event stays on the conversation it was written for');
+END;
+
+CREATE TRIGGER task_events_do_not_move
+BEFORE UPDATE OF task_id, event_id ON task_events
+WHEN NEW.task_id <> OLD.task_id OR NEW.event_id <> OLD.event_id
+BEGIN
+  SELECT RAISE(ABORT, 'a task event belongs to the task and event it was written for');
+END;
+
+CREATE TRIGGER task_events_delivery_moves_forward
+BEFORE UPDATE OF delivery ON task_events
+WHEN (CASE NEW.delivery WHEN 'admitted' THEN 0 WHEN 'exposed' THEN 1 WHEN 'delivered' THEN 2 ELSE 3 END)
+   < (CASE OLD.delivery WHEN 'admitted' THEN 0 WHEN 'exposed' THEN 1 WHEN 'delivered' THEN 2 ELSE 3 END)
+BEGIN
+  SELECT RAISE(ABORT, 'a delivery state never goes back');
+END;
+
+CREATE TRIGGER task_events_exposure_comes_first
+BEFORE UPDATE OF delivery ON task_events
+WHEN (OLD.delivery = 'admitted' AND NEW.delivery IN ('delivered', 'completed'))
+  OR (NEW.delivery = 'delivered' AND OLD.delivery <> 'delivered' AND OLD.pulled_at IS NULL)
+  OR (NEW.delivery = 'completed' AND OLD.delivery <> 'completed' AND OLD.pulled_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM events WHERE id = OLD.event_id AND state = 'completed'))
+BEGIN
+  SELECT RAISE(ABORT, 'a worker acknowledges and completes what it pulled; anything else is the dispatcher settling a completed record');
+END;
+`,
+	// 6. The acknowledgement id settles with the acknowledgement.
+	//
+	// Migration 5 shipped a trigger that read only the row as it was, so a
+	// statement could write the id and leave the row exposed — an id in the
+	// receipt that no worker ever reported. A ledger already at version 5
+	// keeps that trigger, so replacing it is its own migration rather than an
+	// edit to one that has shipped.
+	`
+DROP TRIGGER task_events_acknowledgement_settles_once;
+
+CREATE TRIGGER task_events_acknowledgement_settles_once
+BEFORE UPDATE OF ack_id ON task_events
+WHEN NEW.ack_id IS NOT OLD.ack_id
+ AND (OLD.ack_id IS NOT NULL OR OLD.delivery <> 'exposed' OR NEW.delivery <> 'delivered')
+BEGIN
+  SELECT RAISE(ABORT, 'an acknowledgement id is written with the acknowledgement, once');
+END;
+`,
+	// Migration 7. The dispatcher's side of a task: what it runs in, its
+	// attempts, and how each ended. See ledger_tasks.go for the invariants
+	// these tables hold.
+	//
+	// This was migration 6 while it sat on #736's head; main took 6 for the
+	// acknowledgement trigger before this branch landed, and a shipped
+	// migration is never renumbered under a ledger that has applied it.
+	migrationTasksAndAttempts,
+	// Migration 8. The outbox every lifecycle message goes through. See
+	// outbox.go for the invariants it holds.
+	migrationOutbox,
+
+	// Migration 9. The git worktrees a task ran in. Worktrees are gone —
+	// migration 12 drops the table — but this one stays where it is, exactly
+	// as it shipped: a ledger already at 9 or later has applied it, and a
+	// fresh ledger has to walk the same numbers to reach 12. Deleting it
+	// would make every later migration mean something else.
+	//
+	// 8, 9 and 10 were each written as 8 on their own branch, against
+	// different predecessors. They ship together here, so the order is
+	// settled: 7 the dispatcher's tasks and attempts, 8 the outbox, 9 the
+	// worktrees, 10 the operator's tables. These numbers do not move again —
+	// a ledger that has applied one never sees it renumbered.
+	migrationWorktrees,
+
+	// Migration 10. The hold marker, intake generations, the review tag and
+	// people's decisions on records. See ledger_hold.go for the invariants
+	// they hold.
+	//
+	// This was migration 8 while it sat on card 20's head, behind the tasks
+	// and attempts at 6 and the outbox at 7. Main took 6 for the
+	// acknowledgement trigger, which pushed those two to 7 and 8 and this to
+	// 9. The numbers move only because nothing has shipped them yet; once a
+	// ledger has applied one, its number is fixed.
+	migrationOperator,
+
+	// Migration 11. The retraction: the message that answers an ask a notice
+	// already posted made. It rebuilds the outbox table, which migration 8
+	// shipped with a CHECK that knows four kinds. See outbox.go.
+	migrationRetraction,
+
+	// Migration 12. The worktrees table goes. Nothing makes a worktree any
+	// more: the connector runs a task where it was started, and a task that
+	// needs a directory of its own makes one. The rows it held were a record
+	// of directories on this machine, not of work anyone asked for, and no
+	// query reads them.
+	//
+	// The directories themselves are not touched. A worktree the connector
+	// kept is still on disk, still a git worktree of its repository, still
+	// holding whatever it held — dropping this table forgets the connector's
+	// account of it and nothing else. `git worktree list` in the repository
+	// still finds it, and `git worktree remove` still removes it.
+	migrationDropWorktrees,
+
+	// Migration 13. No directory is associated with a project any more.
+	//
+	// `routed` becomes `served`, which is what it has always held: whether
+	// connect.json lists the record's project, never anything about a
+	// filesystem. Renaming keeps every row's value — a record blocked
+	// no_route stays blocked no_route, and its holding reply still answers
+	// for it.
+	//
+	// The three path columns go. `events.route` and `tasks.route` held the
+	// directory a project was routed to and `tasks.work_dir` the directory a
+	// worker ran in; nothing writes or reads any of them now. The unique
+	// index over work_dir goes with it, and would have to go regardless:
+	// with every task in one directory it would admit one live task on the
+	// whole machine.
+	//
+	// Nothing on disk is touched. A directory a connector ran work in is
+	// still there, still whatever the worker left in it.
+	migrationDropRoutePaths,
+
+	// Migration 14. The blocked-record retry schedule, written onto the row
+	// the verdict is written on.
+	//
+	// retry_since is when the record entered its CURRENT blocked reason, and
+	// that is the whole reason it is not blocked_at. blocked_at is when the
+	// record entered its current run of blocked states and survives every
+	// blocked-to-blocked verdict, which is right for what reads it (a
+	// person's authorization, AuthorizedBlocked) and wrong for a window: the
+	// reasons carry different ones. A record that spent a week as the
+	// unbounded config_unreadable and then blocks read_failed would be
+	// measured against a week-old clock and get none of the twenty-four
+	// hours read_failed promises — the retry stranding the work it is there
+	// to recover (Copilot on #770).
+	//
+	// next_retry_at is admission.NextBlockedRetry's answer, stored: the
+	// moment the record is next owed an attempt, and NULL when it is owed
+	// none — an untimed reason, a window that has passed, or any state but
+	// blocked. It is written by the one move that writes the state, so it
+	// cannot disagree with the row it is on, and the sweep's query is an
+	// indexed comparison against it rather than a scan that dates every
+	// blocked row in the ledger from the beginning of its history.
+	//
+	// The backfill gives every blocked record on a timed reason one attempt
+	// now, and the ordinary schedule takes over from its verdict — except
+	// that it never asks before a deadline a server already named.
+	// MAX(decided_at, retry_at) is what "one attempt now, and not before the
+	// throttle is over" means as one expression; a throttled row whose
+	// retry_at has passed is due like any other, and a row with no retry_at
+	// at all — every reason but throttled, and any throttled row written
+	// before the column existed — is due at the next sweep, which is the
+	// attempt nothing had computed for it. Copying decided_at alone would
+	// have retried into an active throttle, which is how a rate limit
+	// becomes a harder one (Copilot on #770).
+	//
+	// The reason list is written out here rather than shared with the Go
+	// one: a migration says what was true at its own version, and it must
+	// keep saying that after the code moves on.
+	//
+	// It is not reversible and does not try to be. A ledger newer than the
+	// running build is refused at open (ErrLedgerSchema), so a downgrade
+	// never reads these rows rather than reading them wrongly; the columns
+	// are additive, so an older build that did open it would ignore them.
+	// It is run-once rather than idempotent: the migration runner applies it
+	// inside a transaction only when schema_migrations is short of 14, and
+	// its ALTER TABLE would refuse a second run outright rather than
+	// backfill twice.
+	migrationBlockedRetrySchedule,
+}
+
+// migrationBlockedRetrySchedule is migration 14.
+const migrationBlockedRetrySchedule = `
+ALTER TABLE events ADD COLUMN retry_since   TEXT;
+ALTER TABLE events ADD COLUMN next_retry_at TEXT;
+UPDATE events SET retry_since = blocked_at,
+                 next_retry_at = MAX(decided_at, COALESCE(retry_at, decided_at))
+WHERE state = 'blocked' AND decided_at IS NOT NULL AND reason IN (
+  'read_failed', 'read_unresolved', 'delta_unverified',
+  'trust_unverified', 'throttled', 'config_unreadable'
+);
+CREATE INDEX events_next_retry ON events (state, next_retry_at);
+`
+
+// migrationDropRoutePaths is migration 13: the route's path, everywhere the
+// ledger held it. The index is dropped before its column, which is what
+// SQLite requires.
+const migrationDropRoutePaths = `
+ALTER TABLE events RENAME COLUMN routed TO served;
+ALTER TABLE events DROP COLUMN route;
+
+DROP INDEX IF EXISTS tasks_live_work_dir;
+ALTER TABLE tasks DROP COLUMN work_dir;
+ALTER TABLE tasks DROP COLUMN route;
+`
+
+// migrationWorktrees is migration 9 as it shipped: the worktrees a task ran
+// in. Nothing reads it — migration 12 drops the table — and it is kept here
+// only because a migration that has been applied is never taken out of the
+// list. Do not edit it.
+const migrationWorktrees = `
+CREATE TABLE worktrees (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  path                 TEXT    NOT NULL,
+  work_dir             TEXT    NOT NULL,
+  route                TEXT    NOT NULL,
+  repository           TEXT    NOT NULL,
+  branch               TEXT    NOT NULL,
+  base_commit          TEXT    NOT NULL,
+  originating_event_id INTEGER NOT NULL,
+  branch_created       INTEGER NOT NULL DEFAULT 0,
+  admin_dir            TEXT    NOT NULL DEFAULT '',
+  task_id              INTEGER REFERENCES tasks (id),
+  state                TEXT    NOT NULL
+                       CHECK (state IN ('creating', 'live', 'retained', 'removing', 'removed')),
+  retained_reason      TEXT    NOT NULL DEFAULT ''
+                       CHECK (retained_reason IN ('', 'dirty', 'unpushed', 'locked', 'moved', 'unverified', 'finished', 'orphaned')),
+  created_at           TEXT    NOT NULL,
+  finished_at          TEXT,
+  retained_at          TEXT,
+  removed_at           TEXT,
+  removed_by           TEXT    NOT NULL DEFAULT ''
+                       CHECK (removed_by IN ('', 'prune', 'prune_forced', 'missing', 'never_created')),
+  CHECK (state <> 'retained' OR retained_reason <> ''),
+  CHECK ((state = 'removed') = (removed_by <> ''))
+);
+CREATE UNIQUE INDEX worktrees_open_path ON worktrees (path) WHERE state <> 'removed';
+CREATE UNIQUE INDEX worktrees_open_work_dir ON worktrees (work_dir) WHERE state <> 'removed';
+CREATE INDEX worktrees_state ON worktrees (state);
+
+CREATE TRIGGER worktrees_state_edges
+BEFORE UPDATE OF state ON worktrees
+WHEN NEW.state <> OLD.state AND NOT (
+     (OLD.state = 'creating' AND NEW.state IN ('live', 'retained', 'removing', 'removed'))
+  OR (OLD.state = 'live'     AND NEW.state IN ('retained', 'removing', 'removed'))
+  OR (OLD.state = 'retained' AND NEW.state IN ('removing', 'removed'))
+  OR (OLD.state = 'removing' AND NEW.state IN ('retained', 'removed')))
+BEGIN
+  SELECT RAISE(ABORT, 'a worktree state moves along its edges only');
+END;
+`
+
+// migrationDropWorktrees drops what migration 9 made. Dropping the table
+// takes its indexes and its trigger with it; they are named here anyway so
+// this migration reads as the undoing of that one.
+const migrationDropWorktrees = `
+DROP TRIGGER IF EXISTS worktrees_state_edges;
+DROP INDEX IF EXISTS worktrees_open_path;
+DROP INDEX IF EXISTS worktrees_open_work_dir;
+DROP INDEX IF EXISTS worktrees_state;
+DROP TABLE IF EXISTS worktrees;
+`
+
+func (l *Ledger) migrate(ctx context.Context) error {
+	if _, err := l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+  version    INTEGER PRIMARY KEY,
+  applied_at TEXT NOT NULL
+)`); err != nil {
+		return fmt.Errorf("connector: create migration table: %w", err)
+	}
+	// A ledger a newer basecamp wrote is refused, not opened as if it were
+	// current: its triggers and states (a held record, say) are rules this
+	// binary does not know, and running over them could break them — the
+	// rollback case.
+	var newest int
+	if err := l.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&newest); err != nil {
+		return fmt.Errorf("connector: read schema version: %w", err)
+	}
+	if newest > len(migrations) {
+		return fmt.Errorf("connector: ledger at schema %d, this basecamp writes %d: %w", newest, len(migrations), ErrLedgerSchema)
+	}
+
+	for i := range migrations {
+		version := i + 1
+		// The version is read inside the migration's own transaction, which
+		// takes the write lock as it opens: two processes opening a fresh
+		// ledger at once — `status` beside a starting connector — must not
+		// both decide migration 1 is theirs to apply.
+		tx, err := l.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("connector: begin migration %d: %w", version, err)
+		}
+		var applied int
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&applied); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("connector: read schema version: %w", err)
+		}
+		if applied >= version {
+			_ = tx.Rollback()
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("connector: apply migration %d: %w", version, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, l.timestamp()); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("connector: record migration %d: %w", version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("connector: commit migration %d: %w", version, err)
+		}
+	}
+	return nil
+}
+
+// SchemaVersion reports the highest applied migration.
+func (l *Ledger) SchemaVersion(ctx context.Context) (int, error) {
+	return l.schemaVersion(ctx)
+}
+
+// schemaVersion reads the version, and reads a ledger with no migration table
+// as version 0 rather than failing.
+func (l *Ledger) schemaVersion(ctx context.Context) (int, error) {
+	var tables int
+	if err := l.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&tables); err != nil {
+		return 0, err
+	}
+	if tables == 0 {
+		return 0, nil
+	}
+	var version int
+	err := l.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version)
+	return version, err
+}
+
+func (l *Ledger) timestamp() string { return stamp(l.now()) }
+
+// ledgerTime is the one format every ledger timestamp is stored in: UTC, with
+// all nine fractional digits. Fixed width is what makes SQLite's text
+// comparison agree with time order. time.RFC3339Nano trims trailing zeros, so
+// "12:00:00Z" would sort after the later "12:00:00.5Z" and retention would
+// keep a record past its window.
+const ledgerTime = "2006-01-02T15:04:05.000000000Z07:00"

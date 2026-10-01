@@ -57,10 +57,13 @@ func IsLocalhost(host string) bool {
 
 // trustedBasecampHosts are the production Basecamp 3 hosts the CLI trusts when
 // resolving a pasted resource URL: the web host and the API host returned in
-// API payloads.
+// API payloads, under both the original domains and the ones Basecamp moved
+// to (app.basecamp.com is what the browser shows and what agents are handed).
 var trustedBasecampHosts = map[string]bool{
 	"3.basecamp.com":    true,
 	"3.basecampapi.com": true,
+	"app.basecamp.com":  true,
+	"api.basecamp.com":  true,
 }
 
 // IsTrustedBasecampHost reports whether rawURL points at a host the CLI trusts
@@ -123,6 +126,55 @@ func IsRemoteSession() bool {
 	return os.Getenv("SSH_CONNECTION") != "" ||
 		os.Getenv("SSH_CLIENT") != "" ||
 		os.Getenv("SSH_TTY") != ""
+}
+
+// HeadlessReason reports why this host cannot show a browser to the person
+// at the terminal, or "" when launching one is worth trying. It is the
+// browser-launch half of session detection: IsRemoteSession decides whether a
+// loopback callback can be reached at all, this decides whether `open` /
+// `xdg-open` would land anywhere the user can see. The reason is written for
+// a terminal line ("Not opening a browser here (SSH session)").
+//
+// Only environment is consulted, so the answer is cheap and deterministic:
+// an SSH session (any of the three variables sshd sets), a CI runner (the
+// CI variable every major provider exports), or a Unix host with neither an
+// X11 nor a Wayland display. macOS and Windows have no display variable to
+// check; a GUI-less session there is rare enough to leave to the launch
+// error path.
+func HeadlessReason() string {
+	switch {
+	case IsRemoteSession():
+		return "SSH session"
+	case envTruthy(os.Getenv("CI")):
+		return "CI environment"
+	case unixWithoutDisplay():
+		return "no display"
+	default:
+		return ""
+	}
+}
+
+// unixWithoutDisplay is true on the Unix platforms whose browsers need a
+// display server when neither DISPLAY nor WAYLAND_DISPLAY is set.
+func unixWithoutDisplay() bool {
+	switch runtime.GOOS {
+	case "linux", "freebsd", "openbsd", "netbsd", "dragonfly", "solaris", "illumos":
+		return os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == ""
+	default:
+		return false
+	}
+}
+
+// envTruthy reads a boolean-ish environment value the way CI providers set
+// it: "true", "1", "yes" and "on" (any case) count; everything else,
+// including the empty string, does not.
+func envTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // OpenBrowser opens the specified URL in the default browser.

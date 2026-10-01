@@ -27,6 +27,18 @@
         ]
       }
     },
+    "CompleteSubtask": {
+      "idempotent": true,
+      "retry": {
+        "max": 3,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
     "CompleteTodo": {
       "idempotent": true,
       "retry": {
@@ -294,6 +306,17 @@
         ]
       }
     },
+    "CreateSubtask": {
+      "retry": {
+        "max": 2,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
     "CreateTemplate": {
       "retry": {
         "max": 2,
@@ -305,7 +328,40 @@
         ]
       }
     },
+    "CreateTemplateLibraryCardTable": {
+      "retry": {
+        "max": 2,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
     "CreateTemplateLibraryCopy": {
+      "retry": {
+        "max": 2,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
+    "CreateTemplateLibraryTodolist": {
+      "retry": {
+        "max": 2,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
+    "CreateTemplatification": {
       "retry": {
         "max": 2,
         "base_delay_ms": 1000,
@@ -522,6 +578,18 @@
       }
     },
     "DeleteMessageType": {
+      "idempotent": true,
+      "retry": {
+        "max": 3,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
+    "DeleteSubtask": {
       "idempotent": true,
       "retry": {
         "max": 3,
@@ -1663,6 +1731,18 @@
         ]
       }
     },
+    "GetSubtask": {
+      "readonly": true,
+      "retry": {
+        "max": 3,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
     "GetTemplate": {
       "readonly": true,
       "retry": {
@@ -1675,7 +1755,7 @@
         ]
       }
     },
-    "GetTemplateLibrary": {
+    "GetTemplateLibraryCardTables": {
       "readonly": true,
       "retry": {
         "max": 3,
@@ -1688,6 +1768,30 @@
       }
     },
     "GetTemplateLibraryCopy": {
+      "readonly": true,
+      "retry": {
+        "max": 3,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
+    "GetTemplateLibraryTodolists": {
+      "readonly": true,
+      "retry": {
+        "max": 3,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
+    "GetTemplatification": {
       "readonly": true,
       "retry": {
         "max": 3,
@@ -2347,6 +2451,22 @@
         ]
       }
     },
+    "ListSubtasks": {
+      "readonly": true,
+      "pagination": {
+        "style": "link",
+        "maxPageSize": 50
+      },
+      "retry": {
+        "max": 3,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
     "ListTemplates": {
       "readonly": true,
       "pagination": {
@@ -2532,6 +2652,38 @@
         ]
       }
     },
+    "PollEvents": {
+      "readonly": true,
+      "pagination": {
+        "style": "cursor",
+        "maxPageSize": 100
+      },
+      "retry": {
+        "max": 3,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
+    "PollInbox": {
+      "readonly": true,
+      "pagination": {
+        "style": "cursor",
+        "maxPageSize": 100
+      },
+      "retry": {
+        "max": 3,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
     "PrioritizeAssignment": {
       "idempotent": true,
       "retry": {
@@ -2635,6 +2787,18 @@
     "RepositionCardStep": {
       "retry": {
         "max": 2,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
+    "RepositionSubtask": {
+      "idempotent": true,
+      "retry": {
+        "max": 3,
         "base_delay_ms": 1000,
         "backoff": "exponential",
         "retry_on": [
@@ -2840,6 +3004,18 @@
       }
     },
     "UnarchiveRecording": {
+      "idempotent": true,
+      "retry": {
+        "max": 3,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
+    "UncompleteSubtask": {
       "idempotent": true,
       "retry": {
         "max": 3,
@@ -3242,6 +3418,18 @@
         ]
       }
     },
+    "UpdateSubtask": {
+      "idempotent": true,
+      "retry": {
+        "max": 3,
+        "base_delay_ms": 1000,
+        "backoff": "exponential",
+        "retry_on": [
+          429,
+          503
+        ]
+      }
+    },
     "UpdateTemplate": {
       "idempotent": true,
       "retry": {
@@ -3356,6 +3544,10 @@
       "$.title",
       "$.company_name"
     ],
+    "CreateStreamTicketOutput": [
+      "$.ticket",
+      "$.url"
+    ],
     "MyAssignmentAssignee": [
       "$.name",
       "$.avatar_url"
@@ -3399,6 +3591,8 @@
     "PersonBio",
     "PersonLocation",
     "PersonName",
-    "PersonTitle"
+    "PersonTitle",
+    "StreamTicket",
+    "StreamTicketUrl"
   ]
 }

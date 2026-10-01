@@ -176,7 +176,7 @@ ARG basecamp documents uploads create 00 <file>
 ARG basecamp documents vault create 00 <name>
 ARG basecamp documents vaults create 00 <name>
 ARG basecamp documents versions 00 <upload_id|url>
-ARG basecamp events 00 <id|url>
+ARG basecamp events 00 [id|url]
 ARG basecamp file archive 00 <id|url>
 ARG basecamp file doc create 00 <title>
 ARG basecamp file doc create 01 [content]
@@ -336,6 +336,16 @@ ARG basecamp subscriptions remove 01 [person_ids]
 ARG basecamp subscriptions show 00 <id|url>
 ARG basecamp subscriptions subscribe 00 <id|url>
 ARG basecamp subscriptions unsubscribe 00 <id|url>
+ARG basecamp subtasks complete 00 <id|url>
+ARG basecamp subtasks create 00 <todo-or-card-id|url>
+ARG basecamp subtasks create 01 <title>
+ARG basecamp subtasks delete 00 <id|url>
+ARG basecamp subtasks list 00 <todo-or-card-id|url>
+ARG basecamp subtasks move 00 <id|url>
+ARG basecamp subtasks show 00 <id|url>
+ARG basecamp subtasks uncomplete 00 <id|url>
+ARG basecamp subtasks update 00 <id|url>
+ARG basecamp subtasks update 01 [title]
 ARG basecamp templates construct 00 <template_id>
 ARG basecamp templates construction 00 <template_id>
 ARG basecamp templates construction 01 <construction_id>
@@ -520,9 +530,12 @@ CMD basecamp attachments
 CMD basecamp attachments download
 CMD basecamp attachments list
 CMD basecamp auth
+CMD basecamp auth agent
+CMD basecamp auth agent connect
 CMD basecamp auth login
 CMD basecamp auth logout
 CMD basecamp auth refresh
+CMD basecamp auth revoke
 CMD basecamp auth status
 CMD basecamp auth token
 CMD basecamp bonfire
@@ -745,6 +758,8 @@ CMD basecamp documents versions
 CMD basecamp drafts
 CMD basecamp drafts list
 CMD basecamp events
+CMD basecamp events poll
+CMD basecamp events ticket
 CMD basecamp file
 CMD basecamp file archive
 CMD basecamp file doc
@@ -879,6 +894,7 @@ CMD basecamp hillcharts
 CMD basecamp hillcharts show
 CMD basecamp hillcharts track
 CMD basecamp hillcharts untrack
+CMD basecamp inbox
 CMD basecamp lineup
 CMD basecamp lineup create
 CMD basecamp lineup delete
@@ -1001,6 +1017,15 @@ CMD basecamp subscriptions remove
 CMD basecamp subscriptions show
 CMD basecamp subscriptions subscribe
 CMD basecamp subscriptions unsubscribe
+CMD basecamp subtasks
+CMD basecamp subtasks complete
+CMD basecamp subtasks create
+CMD basecamp subtasks delete
+CMD basecamp subtasks list
+CMD basecamp subtasks move
+CMD basecamp subtasks show
+CMD basecamp subtasks uncomplete
+CMD basecamp subtasks update
 CMD basecamp templates
 CMD basecamp templates construct
 CMD basecamp templates construction
@@ -1951,9 +1976,57 @@ FLAG basecamp auth --stats type=bool
 FLAG basecamp auth --styled type=bool
 FLAG basecamp auth --todolist type=string
 FLAG basecamp auth --verbose type=count
+FLAG basecamp auth agent --account type=string
+FLAG basecamp auth agent --agent type=bool
+FLAG basecamp auth agent --cache-dir type=string
+FLAG basecamp auth agent --count type=bool
+FLAG basecamp auth agent --help type=bool
+FLAG basecamp auth agent --hints type=bool
+FLAG basecamp auth agent --ids-only type=bool
+FLAG basecamp auth agent --in type=string
+FLAG basecamp auth agent --jq type=string
+FLAG basecamp auth agent --json type=bool
+FLAG basecamp auth agent --markdown type=bool
+FLAG basecamp auth agent --md type=bool
+FLAG basecamp auth agent --no-hints type=bool
+FLAG basecamp auth agent --no-stats type=bool
+FLAG basecamp auth agent --profile type=string
+FLAG basecamp auth agent --project type=string
+FLAG basecamp auth agent --quiet type=bool
+FLAG basecamp auth agent --stats type=bool
+FLAG basecamp auth agent --styled type=bool
+FLAG basecamp auth agent --todolist type=string
+FLAG basecamp auth agent --verbose type=count
+FLAG basecamp auth agent connect --account type=string
+FLAG basecamp auth agent connect --agent type=bool
+FLAG basecamp auth agent connect --cache-dir type=string
+FLAG basecamp auth agent connect --count type=bool
+FLAG basecamp auth agent connect --device-name type=string
+FLAG basecamp auth agent connect --help type=bool
+FLAG basecamp auth agent connect --hints type=bool
+FLAG basecamp auth agent connect --ids-only type=bool
+FLAG basecamp auth agent connect --in type=string
+FLAG basecamp auth agent connect --jq type=string
+FLAG basecamp auth agent connect --json type=bool
+FLAG basecamp auth agent connect --local type=bool
+FLAG basecamp auth agent connect --markdown type=bool
+FLAG basecamp auth agent connect --md type=bool
+FLAG basecamp auth agent connect --no-browser type=bool
+FLAG basecamp auth agent connect --no-hints type=bool
+FLAG basecamp auth agent connect --no-stats type=bool
+FLAG basecamp auth agent connect --profile type=string
+FLAG basecamp auth agent connect --project type=string
+FLAG basecamp auth agent connect --quiet type=bool
+FLAG basecamp auth agent connect --scope type=string
+FLAG basecamp auth agent connect --software-name type=string
+FLAG basecamp auth agent connect --stats type=bool
+FLAG basecamp auth agent connect --styled type=bool
+FLAG basecamp auth agent connect --todolist type=string
+FLAG basecamp auth agent connect --verbose type=count
 FLAG basecamp auth login --account type=string
 FLAG basecamp auth login --agent type=bool
 FLAG basecamp auth login --cache-dir type=string
+FLAG basecamp auth login --client-id type=string
 FLAG basecamp auth login --count type=bool
 FLAG basecamp auth login --device-code type=bool
 FLAG basecamp auth login --expect-identity type=string
@@ -1979,6 +2052,7 @@ FLAG basecamp auth login --stats type=bool
 FLAG basecamp auth login --styled type=bool
 FLAG basecamp auth login --todolist type=string
 FLAG basecamp auth login --verbose type=count
+FLAG basecamp auth login --with-client-credentials type=bool
 FLAG basecamp auth login --with-token type=bool
 FLAG basecamp auth logout --account type=string
 FLAG basecamp auth logout --agent type=bool
@@ -2022,9 +2096,31 @@ FLAG basecamp auth refresh --stats type=bool
 FLAG basecamp auth refresh --styled type=bool
 FLAG basecamp auth refresh --todolist type=string
 FLAG basecamp auth refresh --verbose type=count
+FLAG basecamp auth revoke --account type=string
+FLAG basecamp auth revoke --agent type=bool
+FLAG basecamp auth revoke --cache-dir type=string
+FLAG basecamp auth revoke --count type=bool
+FLAG basecamp auth revoke --help type=bool
+FLAG basecamp auth revoke --hints type=bool
+FLAG basecamp auth revoke --ids-only type=bool
+FLAG basecamp auth revoke --in type=string
+FLAG basecamp auth revoke --jq type=string
+FLAG basecamp auth revoke --json type=bool
+FLAG basecamp auth revoke --markdown type=bool
+FLAG basecamp auth revoke --md type=bool
+FLAG basecamp auth revoke --no-hints type=bool
+FLAG basecamp auth revoke --no-stats type=bool
+FLAG basecamp auth revoke --profile type=string
+FLAG basecamp auth revoke --project type=string
+FLAG basecamp auth revoke --quiet type=bool
+FLAG basecamp auth revoke --stats type=bool
+FLAG basecamp auth revoke --styled type=bool
+FLAG basecamp auth revoke --todolist type=string
+FLAG basecamp auth revoke --verbose type=count
 FLAG basecamp auth status --account type=string
 FLAG basecamp auth status --agent type=bool
 FLAG basecamp auth status --cache-dir type=string
+FLAG basecamp auth status --check type=bool
 FLAG basecamp auth status --count type=bool
 FLAG basecamp auth status --help type=bool
 FLAG basecamp auth status --hints type=bool
@@ -7292,6 +7388,59 @@ FLAG basecamp events --stats type=bool
 FLAG basecamp events --styled type=bool
 FLAG basecamp events --todolist type=string
 FLAG basecamp events --verbose type=count
+FLAG basecamp events poll --account type=string
+FLAG basecamp events poll --actor-types type=stringSlice
+FLAG basecamp events poll --agent type=bool
+FLAG basecamp events poll --all type=bool
+FLAG basecamp events poll --buckets type=stringSlice
+FLAG basecamp events poll --cache-dir type=string
+FLAG basecamp events poll --count type=bool
+FLAG basecamp events poll --creators type=stringSlice
+FLAG basecamp events poll --exclude-performers type=stringSlice
+FLAG basecamp events poll --help type=bool
+FLAG basecamp events poll --hints type=bool
+FLAG basecamp events poll --ids-only type=bool
+FLAG basecamp events poll --in type=string
+FLAG basecamp events poll --jq type=string
+FLAG basecamp events poll --json type=bool
+FLAG basecamp events poll --markdown type=bool
+FLAG basecamp events poll --max-pages type=int
+FLAG basecamp events poll --md type=bool
+FLAG basecamp events poll --no-hints type=bool
+FLAG basecamp events poll --no-stats type=bool
+FLAG basecamp events poll --performers type=stringSlice
+FLAG basecamp events poll --position type=string
+FLAG basecamp events poll --profile type=string
+FLAG basecamp events poll --project type=string
+FLAG basecamp events poll --quiet type=bool
+FLAG basecamp events poll --since type=string
+FLAG basecamp events poll --stats type=bool
+FLAG basecamp events poll --styled type=bool
+FLAG basecamp events poll --todolist type=string
+FLAG basecamp events poll --types type=stringSlice
+FLAG basecamp events poll --verbose type=count
+FLAG basecamp events ticket --account type=string
+FLAG basecamp events ticket --agent type=bool
+FLAG basecamp events ticket --cache-dir type=string
+FLAG basecamp events ticket --count type=bool
+FLAG basecamp events ticket --help type=bool
+FLAG basecamp events ticket --hints type=bool
+FLAG basecamp events ticket --ids-only type=bool
+FLAG basecamp events ticket --in type=string
+FLAG basecamp events ticket --jq type=string
+FLAG basecamp events ticket --json type=bool
+FLAG basecamp events ticket --markdown type=bool
+FLAG basecamp events ticket --md type=bool
+FLAG basecamp events ticket --no-hints type=bool
+FLAG basecamp events ticket --no-stats type=bool
+FLAG basecamp events ticket --profile type=string
+FLAG basecamp events ticket --project type=string
+FLAG basecamp events ticket --quiet type=bool
+FLAG basecamp events ticket --show-secret type=bool
+FLAG basecamp events ticket --stats type=bool
+FLAG basecamp events ticket --styled type=bool
+FLAG basecamp events ticket --todolist type=string
+FLAG basecamp events ticket --verbose type=count
 FLAG basecamp file --account type=string
 FLAG basecamp file --agent type=bool
 FLAG basecamp file --cache-dir type=string
@@ -10644,6 +10793,34 @@ FLAG basecamp hillcharts untrack --styled type=bool
 FLAG basecamp hillcharts untrack --todolist type=string
 FLAG basecamp hillcharts untrack --todoset type=string
 FLAG basecamp hillcharts untrack --verbose type=count
+FLAG basecamp inbox --account type=string
+FLAG basecamp inbox --agent type=bool
+FLAG basecamp inbox --all type=bool
+FLAG basecamp inbox --buckets type=stringSlice
+FLAG basecamp inbox --cache-dir type=string
+FLAG basecamp inbox --count type=bool
+FLAG basecamp inbox --help type=bool
+FLAG basecamp inbox --hints type=bool
+FLAG basecamp inbox --ids-only type=bool
+FLAG basecamp inbox --in type=string
+FLAG basecamp inbox --jq type=string
+FLAG basecamp inbox --json type=bool
+FLAG basecamp inbox --markdown type=bool
+FLAG basecamp inbox --max-pages type=int
+FLAG basecamp inbox --md type=bool
+FLAG basecamp inbox --no-hints type=bool
+FLAG basecamp inbox --no-stats type=bool
+FLAG basecamp inbox --position type=string
+FLAG basecamp inbox --profile type=string
+FLAG basecamp inbox --project type=string
+FLAG basecamp inbox --quiet type=bool
+FLAG basecamp inbox --reasons type=stringSlice
+FLAG basecamp inbox --since type=string
+FLAG basecamp inbox --stats type=bool
+FLAG basecamp inbox --styled type=bool
+FLAG basecamp inbox --todolist type=string
+FLAG basecamp inbox --types type=stringSlice
+FLAG basecamp inbox --verbose type=count
 FLAG basecamp lineup --account type=string
 FLAG basecamp lineup --agent type=bool
 FLAG basecamp lineup --cache-dir type=string
@@ -10752,6 +10929,7 @@ FLAG basecamp lineup update --verbose type=count
 FLAG basecamp login --account type=string
 FLAG basecamp login --agent type=bool
 FLAG basecamp login --cache-dir type=string
+FLAG basecamp login --client-id type=string
 FLAG basecamp login --count type=bool
 FLAG basecamp login --device-code type=bool
 FLAG basecamp login --expect-identity type=string
@@ -10777,6 +10955,7 @@ FLAG basecamp login --stats type=bool
 FLAG basecamp login --styled type=bool
 FLAG basecamp login --todolist type=string
 FLAG basecamp login --verbose type=count
+FLAG basecamp login --with-client-credentials type=bool
 FLAG basecamp login --with-token type=bool
 FLAG basecamp logout --account type=string
 FLAG basecamp logout --agent type=bool
@@ -10935,6 +11114,7 @@ FLAG basecamp messages create --account type=string
 FLAG basecamp messages create --agent type=bool
 FLAG basecamp messages create --attach type=stringArray
 FLAG basecamp messages create --cache-dir type=string
+FLAG basecamp messages create --category type=string
 FLAG basecamp messages create --count type=bool
 FLAG basecamp messages create --draft type=bool
 FLAG basecamp messages create --edit type=bool
@@ -11127,6 +11307,7 @@ FLAG basecamp messages update --account type=string
 FLAG basecamp messages update --agent type=bool
 FLAG basecamp messages update --body type=string
 FLAG basecamp messages update --cache-dir type=string
+FLAG basecamp messages update --category type=string
 FLAG basecamp messages update --count type=bool
 FLAG basecamp messages update --help type=bool
 FLAG basecamp messages update --hints type=bool
@@ -11137,6 +11318,7 @@ FLAG basecamp messages update --json type=bool
 FLAG basecamp messages update --markdown type=bool
 FLAG basecamp messages update --md type=bool
 FLAG basecamp messages update --message-board type=string
+FLAG basecamp messages update --no-category type=bool
 FLAG basecamp messages update --no-hints type=bool
 FLAG basecamp messages update --no-stats type=bool
 FLAG basecamp messages update --profile type=string
@@ -11347,6 +11529,7 @@ FLAG basecamp msgs create --account type=string
 FLAG basecamp msgs create --agent type=bool
 FLAG basecamp msgs create --attach type=stringArray
 FLAG basecamp msgs create --cache-dir type=string
+FLAG basecamp msgs create --category type=string
 FLAG basecamp msgs create --count type=bool
 FLAG basecamp msgs create --draft type=bool
 FLAG basecamp msgs create --edit type=bool
@@ -11539,6 +11722,7 @@ FLAG basecamp msgs update --account type=string
 FLAG basecamp msgs update --agent type=bool
 FLAG basecamp msgs update --body type=string
 FLAG basecamp msgs update --cache-dir type=string
+FLAG basecamp msgs update --category type=string
 FLAG basecamp msgs update --count type=bool
 FLAG basecamp msgs update --help type=bool
 FLAG basecamp msgs update --hints type=bool
@@ -11549,6 +11733,7 @@ FLAG basecamp msgs update --json type=bool
 FLAG basecamp msgs update --markdown type=bool
 FLAG basecamp msgs update --md type=bool
 FLAG basecamp msgs update --message-board type=string
+FLAG basecamp msgs update --no-category type=bool
 FLAG basecamp msgs update --no-hints type=bool
 FLAG basecamp msgs update --no-stats type=bool
 FLAG basecamp msgs update --profile type=string
@@ -13424,6 +13609,208 @@ FLAG basecamp subscriptions unsubscribe --stats type=bool
 FLAG basecamp subscriptions unsubscribe --styled type=bool
 FLAG basecamp subscriptions unsubscribe --todolist type=string
 FLAG basecamp subscriptions unsubscribe --verbose type=count
+FLAG basecamp subtasks --account type=string
+FLAG basecamp subtasks --agent type=bool
+FLAG basecamp subtasks --cache-dir type=string
+FLAG basecamp subtasks --count type=bool
+FLAG basecamp subtasks --help type=bool
+FLAG basecamp subtasks --hints type=bool
+FLAG basecamp subtasks --ids-only type=bool
+FLAG basecamp subtasks --in type=string
+FLAG basecamp subtasks --jq type=string
+FLAG basecamp subtasks --json type=bool
+FLAG basecamp subtasks --markdown type=bool
+FLAG basecamp subtasks --md type=bool
+FLAG basecamp subtasks --no-hints type=bool
+FLAG basecamp subtasks --no-stats type=bool
+FLAG basecamp subtasks --profile type=string
+FLAG basecamp subtasks --project type=string
+FLAG basecamp subtasks --quiet type=bool
+FLAG basecamp subtasks --stats type=bool
+FLAG basecamp subtasks --styled type=bool
+FLAG basecamp subtasks --todolist type=string
+FLAG basecamp subtasks --verbose type=count
+FLAG basecamp subtasks complete --account type=string
+FLAG basecamp subtasks complete --agent type=bool
+FLAG basecamp subtasks complete --cache-dir type=string
+FLAG basecamp subtasks complete --count type=bool
+FLAG basecamp subtasks complete --help type=bool
+FLAG basecamp subtasks complete --hints type=bool
+FLAG basecamp subtasks complete --ids-only type=bool
+FLAG basecamp subtasks complete --in type=string
+FLAG basecamp subtasks complete --jq type=string
+FLAG basecamp subtasks complete --json type=bool
+FLAG basecamp subtasks complete --markdown type=bool
+FLAG basecamp subtasks complete --md type=bool
+FLAG basecamp subtasks complete --no-hints type=bool
+FLAG basecamp subtasks complete --no-stats type=bool
+FLAG basecamp subtasks complete --profile type=string
+FLAG basecamp subtasks complete --project type=string
+FLAG basecamp subtasks complete --quiet type=bool
+FLAG basecamp subtasks complete --stats type=bool
+FLAG basecamp subtasks complete --styled type=bool
+FLAG basecamp subtasks complete --todolist type=string
+FLAG basecamp subtasks complete --verbose type=count
+FLAG basecamp subtasks create --account type=string
+FLAG basecamp subtasks create --agent type=bool
+FLAG basecamp subtasks create --assignees type=string
+FLAG basecamp subtasks create --cache-dir type=string
+FLAG basecamp subtasks create --count type=bool
+FLAG basecamp subtasks create --due type=string
+FLAG basecamp subtasks create --help type=bool
+FLAG basecamp subtasks create --hints type=bool
+FLAG basecamp subtasks create --ids-only type=bool
+FLAG basecamp subtasks create --in type=string
+FLAG basecamp subtasks create --jq type=string
+FLAG basecamp subtasks create --json type=bool
+FLAG basecamp subtasks create --markdown type=bool
+FLAG basecamp subtasks create --md type=bool
+FLAG basecamp subtasks create --no-hints type=bool
+FLAG basecamp subtasks create --no-stats type=bool
+FLAG basecamp subtasks create --profile type=string
+FLAG basecamp subtasks create --project type=string
+FLAG basecamp subtasks create --quiet type=bool
+FLAG basecamp subtasks create --stats type=bool
+FLAG basecamp subtasks create --styled type=bool
+FLAG basecamp subtasks create --todolist type=string
+FLAG basecamp subtasks create --verbose type=count
+FLAG basecamp subtasks delete --account type=string
+FLAG basecamp subtasks delete --agent type=bool
+FLAG basecamp subtasks delete --cache-dir type=string
+FLAG basecamp subtasks delete --count type=bool
+FLAG basecamp subtasks delete --force type=bool
+FLAG basecamp subtasks delete --help type=bool
+FLAG basecamp subtasks delete --hints type=bool
+FLAG basecamp subtasks delete --ids-only type=bool
+FLAG basecamp subtasks delete --in type=string
+FLAG basecamp subtasks delete --jq type=string
+FLAG basecamp subtasks delete --json type=bool
+FLAG basecamp subtasks delete --markdown type=bool
+FLAG basecamp subtasks delete --md type=bool
+FLAG basecamp subtasks delete --no-hints type=bool
+FLAG basecamp subtasks delete --no-stats type=bool
+FLAG basecamp subtasks delete --profile type=string
+FLAG basecamp subtasks delete --project type=string
+FLAG basecamp subtasks delete --quiet type=bool
+FLAG basecamp subtasks delete --stats type=bool
+FLAG basecamp subtasks delete --styled type=bool
+FLAG basecamp subtasks delete --todolist type=string
+FLAG basecamp subtasks delete --verbose type=count
+FLAG basecamp subtasks list --account type=string
+FLAG basecamp subtasks list --agent type=bool
+FLAG basecamp subtasks list --all type=bool
+FLAG basecamp subtasks list --cache-dir type=string
+FLAG basecamp subtasks list --count type=bool
+FLAG basecamp subtasks list --help type=bool
+FLAG basecamp subtasks list --hints type=bool
+FLAG basecamp subtasks list --ids-only type=bool
+FLAG basecamp subtasks list --in type=string
+FLAG basecamp subtasks list --jq type=string
+FLAG basecamp subtasks list --json type=bool
+FLAG basecamp subtasks list --limit type=int
+FLAG basecamp subtasks list --markdown type=bool
+FLAG basecamp subtasks list --md type=bool
+FLAG basecamp subtasks list --no-hints type=bool
+FLAG basecamp subtasks list --no-stats type=bool
+FLAG basecamp subtasks list --page type=int
+FLAG basecamp subtasks list --profile type=string
+FLAG basecamp subtasks list --project type=string
+FLAG basecamp subtasks list --quiet type=bool
+FLAG basecamp subtasks list --stats type=bool
+FLAG basecamp subtasks list --styled type=bool
+FLAG basecamp subtasks list --todolist type=string
+FLAG basecamp subtasks list --verbose type=count
+FLAG basecamp subtasks move --account type=string
+FLAG basecamp subtasks move --agent type=bool
+FLAG basecamp subtasks move --cache-dir type=string
+FLAG basecamp subtasks move --count type=bool
+FLAG basecamp subtasks move --help type=bool
+FLAG basecamp subtasks move --hints type=bool
+FLAG basecamp subtasks move --ids-only type=bool
+FLAG basecamp subtasks move --in type=string
+FLAG basecamp subtasks move --jq type=string
+FLAG basecamp subtasks move --json type=bool
+FLAG basecamp subtasks move --markdown type=bool
+FLAG basecamp subtasks move --md type=bool
+FLAG basecamp subtasks move --no-hints type=bool
+FLAG basecamp subtasks move --no-stats type=bool
+FLAG basecamp subtasks move --pos type=int
+FLAG basecamp subtasks move --position type=int
+FLAG basecamp subtasks move --profile type=string
+FLAG basecamp subtasks move --project type=string
+FLAG basecamp subtasks move --quiet type=bool
+FLAG basecamp subtasks move --stats type=bool
+FLAG basecamp subtasks move --styled type=bool
+FLAG basecamp subtasks move --todolist type=string
+FLAG basecamp subtasks move --verbose type=count
+FLAG basecamp subtasks show --account type=string
+FLAG basecamp subtasks show --agent type=bool
+FLAG basecamp subtasks show --cache-dir type=string
+FLAG basecamp subtasks show --count type=bool
+FLAG basecamp subtasks show --help type=bool
+FLAG basecamp subtasks show --hints type=bool
+FLAG basecamp subtasks show --ids-only type=bool
+FLAG basecamp subtasks show --in type=string
+FLAG basecamp subtasks show --jq type=string
+FLAG basecamp subtasks show --json type=bool
+FLAG basecamp subtasks show --markdown type=bool
+FLAG basecamp subtasks show --md type=bool
+FLAG basecamp subtasks show --no-hints type=bool
+FLAG basecamp subtasks show --no-stats type=bool
+FLAG basecamp subtasks show --profile type=string
+FLAG basecamp subtasks show --project type=string
+FLAG basecamp subtasks show --quiet type=bool
+FLAG basecamp subtasks show --stats type=bool
+FLAG basecamp subtasks show --styled type=bool
+FLAG basecamp subtasks show --todolist type=string
+FLAG basecamp subtasks show --verbose type=count
+FLAG basecamp subtasks uncomplete --account type=string
+FLAG basecamp subtasks uncomplete --agent type=bool
+FLAG basecamp subtasks uncomplete --cache-dir type=string
+FLAG basecamp subtasks uncomplete --count type=bool
+FLAG basecamp subtasks uncomplete --help type=bool
+FLAG basecamp subtasks uncomplete --hints type=bool
+FLAG basecamp subtasks uncomplete --ids-only type=bool
+FLAG basecamp subtasks uncomplete --in type=string
+FLAG basecamp subtasks uncomplete --jq type=string
+FLAG basecamp subtasks uncomplete --json type=bool
+FLAG basecamp subtasks uncomplete --markdown type=bool
+FLAG basecamp subtasks uncomplete --md type=bool
+FLAG basecamp subtasks uncomplete --no-hints type=bool
+FLAG basecamp subtasks uncomplete --no-stats type=bool
+FLAG basecamp subtasks uncomplete --profile type=string
+FLAG basecamp subtasks uncomplete --project type=string
+FLAG basecamp subtasks uncomplete --quiet type=bool
+FLAG basecamp subtasks uncomplete --stats type=bool
+FLAG basecamp subtasks uncomplete --styled type=bool
+FLAG basecamp subtasks uncomplete --todolist type=string
+FLAG basecamp subtasks uncomplete --verbose type=count
+FLAG basecamp subtasks update --account type=string
+FLAG basecamp subtasks update --agent type=bool
+FLAG basecamp subtasks update --assignees type=string
+FLAG basecamp subtasks update --cache-dir type=string
+FLAG basecamp subtasks update --count type=bool
+FLAG basecamp subtasks update --due type=string
+FLAG basecamp subtasks update --help type=bool
+FLAG basecamp subtasks update --hints type=bool
+FLAG basecamp subtasks update --ids-only type=bool
+FLAG basecamp subtasks update --in type=string
+FLAG basecamp subtasks update --jq type=string
+FLAG basecamp subtasks update --json type=bool
+FLAG basecamp subtasks update --markdown type=bool
+FLAG basecamp subtasks update --md type=bool
+FLAG basecamp subtasks update --no-assignees type=bool
+FLAG basecamp subtasks update --no-due type=bool
+FLAG basecamp subtasks update --no-hints type=bool
+FLAG basecamp subtasks update --no-stats type=bool
+FLAG basecamp subtasks update --profile type=string
+FLAG basecamp subtasks update --project type=string
+FLAG basecamp subtasks update --quiet type=bool
+FLAG basecamp subtasks update --stats type=bool
+FLAG basecamp subtasks update --styled type=bool
+FLAG basecamp subtasks update --title type=string
+FLAG basecamp subtasks update --todolist type=string
+FLAG basecamp subtasks update --verbose type=count
 FLAG basecamp templates --account type=string
 FLAG basecamp templates --agent type=bool
 FLAG basecamp templates --cache-dir type=string
@@ -18210,9 +18597,12 @@ SUB basecamp attachments
 SUB basecamp attachments download
 SUB basecamp attachments list
 SUB basecamp auth
+SUB basecamp auth agent
+SUB basecamp auth agent connect
 SUB basecamp auth login
 SUB basecamp auth logout
 SUB basecamp auth refresh
+SUB basecamp auth revoke
 SUB basecamp auth status
 SUB basecamp auth token
 SUB basecamp bonfire
@@ -18435,6 +18825,8 @@ SUB basecamp documents versions
 SUB basecamp drafts
 SUB basecamp drafts list
 SUB basecamp events
+SUB basecamp events poll
+SUB basecamp events ticket
 SUB basecamp file
 SUB basecamp file archive
 SUB basecamp file doc
@@ -18569,6 +18961,7 @@ SUB basecamp hillcharts
 SUB basecamp hillcharts show
 SUB basecamp hillcharts track
 SUB basecamp hillcharts untrack
+SUB basecamp inbox
 SUB basecamp lineup
 SUB basecamp lineup create
 SUB basecamp lineup delete
@@ -18691,6 +19084,15 @@ SUB basecamp subscriptions remove
 SUB basecamp subscriptions show
 SUB basecamp subscriptions subscribe
 SUB basecamp subscriptions unsubscribe
+SUB basecamp subtasks
+SUB basecamp subtasks complete
+SUB basecamp subtasks create
+SUB basecamp subtasks delete
+SUB basecamp subtasks list
+SUB basecamp subtasks move
+SUB basecamp subtasks show
+SUB basecamp subtasks uncomplete
+SUB basecamp subtasks update
 SUB basecamp templates
 SUB basecamp templates construct
 SUB basecamp templates construction

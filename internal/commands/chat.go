@@ -425,7 +425,7 @@ func runChatPost(cmd *cobra.Command, app *appctx.App, chatID, project, content, 
 		if contentType == "" {
 			mentionInput = richtext.MarkdownToHTML(content)
 		}
-		result, resolveErr := resolveMentions(cmd.Context(), app.Names, mentionInput)
+		result, resolveErr := resolveMentions(cmd.Context(), app.Names, mentionScope(app, resolvedProjectID, project, app.Flags.Project), mentionInput)
 		if resolveErr != nil {
 			return resolveErr
 		}
@@ -690,8 +690,11 @@ You can pass either a line ID or a Basecamp line URL:
 				return err
 			}
 
-			// Extract ID and project from URL if provided
-			lineID, urlProjectID := extractWithProject(args[0])
+			// Extract ID, project and room from URL if provided
+			lineID, urlProjectID, urlChatID, err := chatLineRef(app, args[0])
+			if err != nil {
+				return err
+			}
 
 			// Resolve project - use URL > flag > config, with interactive fallback
 			projectID := *project
@@ -716,8 +719,13 @@ You can pass either a line ID or a Basecamp line URL:
 				return err
 			}
 
-			// Get chat ID from project if not specified
-			effectiveChatID := *chatID
+			// The URL's room wins over --room, which may be stale from a
+			// previous command; the project's default room is the last resort,
+			// and fails when the project has more than one.
+			effectiveChatID := urlChatID
+			if effectiveChatID == "" {
+				effectiveChatID = *chatID
+			}
 			if effectiveChatID == "" {
 				effectiveChatID, err = getChatID(cmd, app, resolvedProjectID)
 				if err != nil {
@@ -1025,7 +1033,7 @@ edit to rich text.`,
 				if ct == "" {
 					messageContent = richtext.MarkdownToHTML(messageContent)
 				}
-				result, resolveErr := resolveMentions(cmd.Context(), app.Names, messageContent)
+				result, resolveErr := resolveMentions(cmd.Context(), app.Names, mentionScope(app, urlProjectID, resolvedProjectID, *project, app.Flags.Project), messageContent)
 				if resolveErr != nil {
 					return resolveErr
 				}
@@ -1140,8 +1148,11 @@ You can pass either a line ID or a Basecamp line URL:
 				return err
 			}
 
-			// Extract ID and project from URL if provided
-			lineID, urlProjectID := extractWithProject(args[0])
+			// Extract ID, project and room from URL if provided
+			lineID, urlProjectID, urlChatID, err := chatLineRef(app, args[0])
+			if err != nil {
+				return err
+			}
 
 			// Resolve project - use URL > flag > config, with interactive fallback
 			projectID := *project
@@ -1166,8 +1177,13 @@ You can pass either a line ID or a Basecamp line URL:
 				return err
 			}
 
-			// Get chat ID from project if not specified
-			effectiveChatID := *chatID
+			// The URL's room wins over --room, which may be stale from a
+			// previous command; the project's default room is the last resort,
+			// and fails when the project has more than one.
+			effectiveChatID := urlChatID
+			if effectiveChatID == "" {
+				effectiveChatID = *chatID
+			}
 			if effectiveChatID == "" {
 				effectiveChatID, err = getChatID(cmd, app, resolvedProjectID)
 				if err != nil {
@@ -1227,6 +1243,31 @@ You can pass either a line ID or a Basecamp line URL:
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation prompt")
 
 	return cmd
+}
+
+// chatLineRef extracts the line, project and room IDs from a chat line
+// argument. A chat-line URL names the room that owns the line; a bare ID names
+// none, leaving the room to --room or the project's default.
+//
+// A URL is held to what chat update holds it to: a trusted Basecamp host, an
+// individual line (a room's /chats/{c}/lines parses with the room's ID where
+// the line's belongs, and would act on line {c}), and the configured account.
+func chatLineRef(app *appctx.App, arg string) (lineID, projectID, chatID string, err error) {
+	if !urlarg.IsURL(arg) {
+		lineID, projectID = extractWithProject(arg)
+		return lineID, projectID, "", nil
+	}
+	if !hostutil.IsTrustedBasecampHost(arg, app.Config.BaseURL) {
+		return "", "", "", output.ErrUsage("refusing untrusted host in URL — expected a Basecamp URL")
+	}
+	parsed := urlarg.Parse(arg)
+	if parsed == nil || parsed.Type != "lines" || parsed.IsCollection {
+		return "", "", "", output.ErrUsage("expected a chat-line ID or URL of the form /chats/{c}/lines/{l} or /chats/{c}@{l}")
+	}
+	if parsed.AccountID != "" && app.Config.AccountID != "" && parsed.AccountID != app.Config.AccountID {
+		return "", "", "", output.ErrUsage(fmt.Sprintf("URL account %s does not match the configured account %s", parsed.AccountID, app.Config.AccountID))
+	}
+	return parsed.RecordingID, parsed.ProjectID, parsed.CampfireID, nil
 }
 
 // getChatID retrieves the chat ID from a project's dock, handling multi-dock projects.

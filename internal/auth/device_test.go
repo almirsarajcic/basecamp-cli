@@ -29,6 +29,7 @@ type deviceAS struct {
 	mu          sync.Mutex
 	deviceForms []url.Values
 	tokenForms  []url.Values
+	revokeForms []url.Values
 
 	// metadata renders the AS metadata JSON. Defaults to a device-capable doc
 	// with issuer = the server's own origin.
@@ -37,6 +38,8 @@ type deviceAS struct {
 	deviceAuth func() (status int, body string)
 	// token renders the nth (0-based) token poll response.
 	token func(call int) (status int, body string)
+	// revoke renders the nth (0-based) RFC 7009 revocation response.
+	revoke func(call int) (status int, body string)
 }
 
 func startDeviceAS(t *testing.T) *deviceAS {
@@ -69,12 +72,24 @@ func startDeviceAS(t *testing.T) *deviceAS {
 		w.WriteHeader(status)
 		fmt.Fprint(w, body)
 	}
+	revokeHandler := func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		as.mu.Lock()
+		call := len(as.revokeForms)
+		as.revokeForms = append(as.revokeForms, r.PostForm)
+		as.mu.Unlock()
+		status, body := as.revoke(call)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	}
 	mux.HandleFunc("/oauth/device", deviceHandler)
 	mux.HandleFunc("/oauth/token", tokenHandler)
 	// The paths Basecamp mounts, which a pinned BASECAMP_OAUTH_ISSUER derives
 	// without reading metadata.
 	mux.HandleFunc("/oauth/device_authorizations", deviceHandler)
 	mux.HandleFunc("/oauth/tokens", tokenHandler)
+	mux.HandleFunc("/oauth/revocations", revokeHandler)
 
 	as.srv = httptest.NewServer(mux)
 	t.Cleanup(as.srv.Close)
@@ -84,9 +99,12 @@ func startDeviceAS(t *testing.T) *deviceAS {
 			"issuer": %q,
 			"token_endpoint": %q,
 			"device_authorization_endpoint": %q,
+			"revocation_endpoint": %q,
+			"revocation_endpoint_auth_methods_supported": ["none", "client_secret_post"],
 			"grant_types_supported": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]
-		}`, as.srv.URL, as.srv.URL+"/oauth/token", as.srv.URL+"/oauth/device")
+		}`, as.srv.URL, as.srv.URL+"/oauth/token", as.srv.URL+"/oauth/device", as.srv.URL+"/oauth/revocations")
 	}
+	as.revoke = func(int) (int, string) { return http.StatusOK, `{}` }
 	as.deviceAuth = func() (int, string) {
 		return http.StatusOK, fmt.Sprintf(
 			`{"device_code":"dev-code-1","user_code":"ABCD-EFGH","verification_uri":%q,"verification_uri_complete":%q,"expires_in":600,"interval":1}`,
@@ -108,6 +126,12 @@ func (as *deviceAS) tokenCalls() []url.Values {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	return append([]url.Values(nil), as.tokenForms...)
+}
+
+func (as *deviceAS) revokeCalls() []url.Values {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	return append([]url.Values(nil), as.revokeForms...)
 }
 
 // startResourceServer starts a mock protected resource advertising the given
@@ -150,6 +174,9 @@ func newDeviceTestManager(t *testing.T, baseURL string) *Manager {
 	t.Setenv("SSH_CONNECTION", "")
 	t.Setenv("SSH_CLIENT", "")
 	t.Setenv("SSH_TTY", "")
+	t.Setenv("CI", "")
+	t.Setenv("DISPLAY", ":0")
+	t.Setenv("BASECAMP_NONINTERACTIVE", "")
 	// A pinned issuer in the developer's environment would bypass the
 	// discovery every test here exercises.
 	t.Setenv("BASECAMP_OAUTH_ISSUER", "")
@@ -386,7 +413,98 @@ func TestLoginDevice_BrowserLaunchFailureContinues(t *testing.T) {
 	})
 	require.NoError(t, err, "launch failure must not abort the flow")
 	assert.Equal(t, "bc5", result.OAuthType)
-	assert.Contains(t, cl.joined(), "Couldn't open browser")
+	assert.Contains(t, cl.joined(), "Couldn't open a browser. Open the link above.")
+}
+
+// TestLoginDevice_Transcript pins the device-flow copy: link first, code
+// second, each on its own line, the lifetime beside the code, the phishing
+// warning, and one browser line that says what happened.
+func TestLoginDevice_Transcript(t *testing.T) {
+	as := startDeviceAS(t)
+	resource := startResourceServer(t, as.srv.URL)
+
+	t.Run("browser opens", func(t *testing.T) {
+		m := newDeviceTestManager(t, resource.URL)
+		cl := &collectLogger{}
+		_, err := m.Login(context.Background(), LoginOptions{
+			Logger:          cl.log,
+			BrowserLauncher: func(string) error { return nil },
+			deviceOptions:   []oauth.DeviceOption{instantSleep()},
+		})
+		require.NoError(t, err)
+		assert.Contains(t, cl.joined(), strings.Join([]string{
+			"Sign in to Basecamp",
+			"",
+			"  1. Open this link on any device",
+			"     " + as.srv.URL + "/verify?user_code=ABCD-EFGH",
+			"  2. Enter this one-time code when asked (expires in 10 minutes)",
+			"     ABCD-EFGH",
+			"",
+			"Only continue if you started this login yourself. If a website or another",
+			"person gave you this code, press Ctrl-C now.",
+			"",
+			"Opening your browser… If nothing appears, open the link above.",
+			"Waiting for approval… (the code expires in 10 minutes)",
+		}, "\n"))
+	})
+
+	t.Run("headless host says why", func(t *testing.T) {
+		m := newDeviceTestManager(t, resource.URL)
+		t.Setenv("SSH_TTY", "/dev/pts/3")
+		cl := &collectLogger{}
+		launched := 0
+		_, err := m.Login(context.Background(), LoginOptions{
+			Logger:          cl.log,
+			BrowserLauncher: func(string) error { launched++; return nil },
+			deviceOptions:   []oauth.DeviceOption{instantSleep()},
+		})
+		require.NoError(t, err)
+		assert.Zero(t, launched)
+		assert.Contains(t, cl.joined(), "Not opening a browser here (SSH session). Open the link on any device.")
+	})
+
+	t.Run("--local overrides the host heuristics", func(t *testing.T) {
+		m := newDeviceTestManager(t, resource.URL)
+		t.Setenv("CI", "true")
+		launched := 0
+		_, err := m.Login(context.Background(), LoginOptions{
+			Local:           true,
+			BrowserLauncher: func(string) error { launched++; return nil },
+			deviceOptions:   []oauth.DeviceOption{instantSleep()},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, launched)
+	})
+
+	t.Run("--no-browser prints the link alone", func(t *testing.T) {
+		m := newDeviceTestManager(t, resource.URL)
+		cl := &collectLogger{}
+		_, err := m.Login(context.Background(), LoginOptions{
+			NoBrowser:       true,
+			Logger:          cl.log,
+			BrowserLauncher: func(string) error { t.Fatal("must not launch"); return nil },
+			deviceOptions:   []oauth.DeviceOption{instantSleep()},
+		})
+		require.NoError(t, err)
+		logs := cl.joined()
+		assert.NotContains(t, logs, "browser")
+		assert.Contains(t, logs, "Waiting for approval… (the code expires in 10 minutes)")
+	})
+
+	t.Run("a non-terminal progress writer gets the static line", func(t *testing.T) {
+		m := newDeviceTestManager(t, resource.URL)
+		cl := &collectLogger{}
+		var progress strings.Builder
+		_, err := m.Login(context.Background(), LoginOptions{
+			NoBrowser:     true,
+			Logger:        cl.log,
+			Progress:      &progress,
+			deviceOptions: []oauth.DeviceOption{instantSleep()},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, progress.String(), "nothing is drawn on a non-terminal")
+		assert.Contains(t, cl.joined(), "Waiting for approval… (the code expires in 10 minutes)")
+	})
 }
 
 func TestLoginDevice_ScopeWiring(t *testing.T) {
@@ -800,7 +918,10 @@ func TestRefreshLocked_LegacyBC3RequiresReauth(t *testing.T) {
 
 	err := m.refreshLocked(context.Background(), "test", creds)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "re-authenticate")
+	var cliErr *output.Error
+	require.ErrorAs(t, err, &cliErr)
+	assert.Equal(t, output.CodeAuth, cliErr.Code)
+	assert.Equal(t, "Run: basecamp auth login", cliErr.Hint)
 	assert.False(t, transport.attempted.Load(), "legacy bc3 refresh must fail without any network request")
 }
 
@@ -1106,7 +1227,7 @@ func TestImportToken(t *testing.T) {
 	m := newDeviceTestManager(t, "https://3.basecampapi.com")
 	m.cfg.ActiveProfile = "bot"
 
-	require.NoError(t, m.ImportToken("bc_at_secret", "full", "51177542", "bot@example.com", time.Time{}))
+	require.NoError(t, m.ImportToken(context.Background(), "bc_at_secret", "full", "51177542", "bot@example.com", time.Time{}))
 
 	creds, err := m.store.Load("profile:bot")
 	require.NoError(t, err)
@@ -1126,13 +1247,13 @@ func TestImportToken(t *testing.T) {
 	require.Error(t, err, "an explicit refresh has nothing to refresh with")
 	assert.Contains(t, err.Error(), "No refresh token")
 
-	err = m.ImportToken("bc_at_secret", "admin", "", "", time.Time{})
+	err = m.ImportToken(context.Background(), "bc_at_secret", "admin", "", "", time.Time{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Invalid scope")
 
 	// A reported expiry is kept, and near it the token is refused rather
 	// than served: there is no refresh token to renew it with.
-	require.NoError(t, m.ImportToken("bc_at_short", "full", "", "", time.Now().Add(time.Minute)))
+	require.NoError(t, m.ImportToken(context.Background(), "bc_at_short", "full", "", "", time.Now().Add(time.Minute)))
 	creds, err = m.store.Load("profile:bot")
 	require.NoError(t, err)
 	assert.Positive(t, creds.ExpiresAt)
@@ -1197,4 +1318,28 @@ func TestDiscoverOAuth_PinnedIssuerIsSanitizedForTheTerminal(t *testing.T) {
 	assert.Contains(t, err.Error(), "BASECAMP_OAUTH_ISSUER")
 	assert.NotContains(t, err.Error(), "\u0085")
 	assert.NotContains(t, cl.joined(), "\u0085")
+}
+
+// TestLoginDevice_CancelDuringVerifyStoresNothing: a cancel that lands after
+// the token was issued but before it is stored — Ctrl-C in the same instant
+// the approval completes — must not save the credential, even though a
+// non-strict verifier answers a canceled request with nil.
+func TestLoginDevice_CancelDuringVerifyStoresNothing(t *testing.T) {
+	as := startDeviceAS(t)
+	resource := startResourceServer(t, as.srv.URL)
+	m := newDeviceTestManager(t, resource.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err := m.Login(ctx, LoginOptions{
+		NoBrowser:     true,
+		deviceOptions: []oauth.DeviceOption{instantSleep()},
+		Verify: func(context.Context, string, string) error {
+			cancel()
+			return nil
+		},
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	_, loadErr := m.store.Load(config.NormalizeBaseURL(resource.URL))
+	require.Error(t, loadErr, "a canceled login stores nothing")
 }

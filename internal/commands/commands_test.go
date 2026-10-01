@@ -16,8 +16,10 @@ func TestCatalogMatchesRegisteredCommands(t *testing.T) {
 
 	// Get registered command names
 	registered := make(map[string]bool)
+	hidden := make(map[string]bool)
 	for _, cmd := range root.Commands() {
 		registered[cmd.Name()] = true
+		hidden[cmd.Name()] = cmd.Hidden
 	}
 	// Get catalog command names
 	catalog := make(map[string]bool)
@@ -33,10 +35,11 @@ func TestCatalogMatchesRegisteredCommands(t *testing.T) {
 		}
 	}
 
-	// Find commands registered but not in catalog
+	// Find commands registered but not in catalog. A hidden command need not
+	// be listed, as it is not in help.
 	var missingFromCatalog []string
 	for name := range registered {
-		if !catalog[name] {
+		if !catalog[name] && !hidden[name] {
 			missingFromCatalog = append(missingFromCatalog, name)
 		}
 	}
@@ -81,6 +84,7 @@ func buildRootWithAllCommands() *cobra.Command {
 	root.AddCommand(commands.NewCheckinsCmd())
 	root.AddCommand(commands.NewWebhooksCmd())
 	root.AddCommand(commands.NewEventsCmd())
+	root.AddCommand(commands.NewInboxCmd())
 	root.AddCommand(commands.NewSubscriptionsCmd())
 	root.AddCommand(commands.NewForwardsCmd())
 	root.AddCommand(commands.NewMessageboardsCmd())
@@ -113,6 +117,7 @@ func buildRootWithAllCommands() *cobra.Command {
 	root.AddCommand(commands.NewAssignmentsCmd())
 	root.AddCommand(commands.NewBookmarksCmd())
 	root.AddCommand(commands.NewBubbleUpCmd())
+	root.AddCommand(commands.NewSubtasksCmd())
 	root.AddCommand(commands.NewDraftsCmd())
 	root.AddCommand(commands.NewNotesCmd())
 	root.AddCommand(commands.NewCalendarsCmd())
@@ -121,6 +126,7 @@ func buildRootWithAllCommands() *cobra.Command {
 	root.AddCommand(commands.NewProfileCmd())
 	root.AddCommand(commands.NewBonfireCmd())
 	root.AddCommand(commands.NewMCPCmd())
+	root.AddCommand(commands.NewConnectCmd())
 	commands.InstallDashGuard(root)
 	root.InitDefaultHelpCmd()
 	return root

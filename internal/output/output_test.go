@@ -792,6 +792,70 @@ func TestWriterCountFormatSingleItem(t *testing.T) {
 	assert.Equal(t, "1\n", output)
 }
 
+// TestWriterIDsFormatNoticeOnStderr and its --count twin verify the rows-only
+// formats still deliver a notice. Their stdout has no envelope field to carry
+// one, so without the stderr channel a capped walk prints an id list or a
+// count that reads as the complete answer.
+func TestWriterIDsFormatNoticeOnStderr(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	w := New(Options{
+		Format:    FormatIDs,
+		Writer:    &stdout,
+		ErrWriter: &stderr,
+	})
+
+	data := []map[string]any{{"id": 1}, {"id": 2}}
+	err := w.OK(data, WithNotice("Stopped at --max-pages 2; more remains."))
+	require.NoError(t, err)
+
+	assert.Equal(t, "1\n2\n", stdout.String(), "notice must not corrupt the id stream")
+	assert.Contains(t, stderr.String(), "Stopped at --max-pages 2; more remains.")
+}
+
+func TestWriterCountFormatNoticeOnStderr(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	w := New(Options{
+		Format:    FormatCount,
+		Writer:    &stdout,
+		ErrWriter: &stderr,
+	})
+
+	data := []map[string]any{{"id": 1}, {"id": 2}}
+	err := w.OK(data, WithNotice("Stopped at --max-pages 2; more remains."))
+	require.NoError(t, err)
+
+	assert.Equal(t, "2\n", stdout.String(), "notice must not corrupt the count stream")
+	assert.Contains(t, stderr.String(), "Stopped at --max-pages 2; more remains.")
+}
+
+func TestWriterIDsFormatNoNoticeLeavesStderrEmpty(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	w := New(Options{
+		Format:    FormatIDs,
+		Writer:    &stdout,
+		ErrWriter: &stderr,
+	})
+
+	err := w.OK([]map[string]any{{"id": 1}}, WithSummary("all good"))
+	require.NoError(t, err)
+
+	assert.Empty(t, stderr.String())
+}
+
+func TestWriterIDsFormatNoticeIsSanitized(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	w := New(Options{
+		Format:    FormatIDs,
+		Writer:    &stdout,
+		ErrWriter: &stderr,
+	})
+
+	err := w.OK([]map[string]any{{"id": 1}}, WithNotice("\x1b]0;evil\x07more\nremains"))
+	require.NoError(t, err)
+
+	assert.Equal(t, "notice: more remains\n", stderr.String())
+}
+
 func TestDefaultOptions(t *testing.T) {
 	opts := DefaultOptions()
 
@@ -4607,4 +4671,25 @@ func TestAttachmentMetaSinksSanitized(t *testing.T) {
 
 	assertSinkNeutralized(t, render(FormatStyled), "styled attachment meta", true)
 	assertSinkNeutralized(t, render(FormatMarkdown), "markdown attachment meta", false)
+}
+
+func TestTableColumnsComeFromEveryRow(t *testing.T) {
+	// Like `basecamp profile list`: default and active are set only on the
+	// row they apply to, and it is not the first.
+	rows := []map[string]any{
+		{"name": "a", "base_url": "https://3.basecampapi.com", "authenticated": true, "account_id": "1"},
+		{"name": "b", "base_url": "https://3.basecampapi.com", "authenticated": true, "account_id": "1", "default": true, "active": true},
+	}
+	want := []string{"name", "account_id", "active", "authenticated", "base_url", "default"}
+	keys := func(cols []column) []string {
+		ks := make([]string, 0, len(cols))
+		for _, c := range cols {
+			ks = append(ks, c.key)
+		}
+		return ks
+	}
+	for range 20 { // equal priorities once followed map order
+		assert.Equal(t, want, keys((&Renderer{width: 200}).detectColumns(rows)))
+		assert.Equal(t, want, keys((&MarkdownRenderer{}).detectColumns(rows)))
+	}
 }

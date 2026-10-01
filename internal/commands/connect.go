@@ -1,0 +1,1261 @@
+package commands
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+
+	surfguard "github.com/basecamp/surfguard/go"
+	"github.com/spf13/cobra"
+
+	"github.com/basecamp/basecamp-sdk/go/pkg/basecamp"
+
+	"github.com/basecamp/basecamp-cli/internal/appctx"
+	"github.com/basecamp/basecamp-cli/internal/auth"
+	"github.com/basecamp/basecamp-cli/internal/config"
+	"github.com/basecamp/basecamp-cli/internal/connector/admission"
+	"github.com/basecamp/basecamp-cli/internal/connector/setup"
+	"github.com/basecamp/basecamp-cli/internal/output"
+	"github.com/basecamp/basecamp-cli/internal/richtext"
+	"github.com/basecamp/basecamp-cli/internal/version"
+)
+
+// NewConnectCmd is the local agent connector's command group.
+func NewConnectCmd() *cobra.Command {
+	var run connectRunFlags
+	cmd := &cobra.Command{
+		Use: "connect",
+		// Hidden for now.
+		Hidden: true,
+		Short:  "Run a local agent connector for a Basecamp agent",
+		Long: `Run a local agent connector: it listens to the account event feed as a
+Basecamp agent, admits what a trusted person asks of that agent, and prints
+each trusted request for the session that started it to handle. It starts no
+workers and posts nothing itself: the basecamp-connect skill, run in your own
+Claude Code session, acknowledges each request, picks the repo and hands it to
+a subagent that replies as the agent.
+
+Connect the agent to a profile first (basecamp auth agent connect -P <profile>),
+then run setup on that profile: it records who may drive the agent, maps
+which Basecamp projects it serves, and checks the connector is
+ready. Show prints what setup recorded. Then run the connector on it:
+
+  basecamp connect -P <profile> [--project <id>]... [--shadow]
+
+It runs in the foreground until interrupted. Stdout is one JSON object per
+line: events seen, admission's verdicts, and a "type":"request" line for each
+trusted request, which is the one to act on. Logs go to stderr. SIGINT and
+SIGTERM exit 130 and 143. A request made before the connector started is not
+picked up. --shadow admits and logs in an isolated state directory and hands
+off nothing. --hold sets a durable hold: intake and admission run, nothing is
+handed off, and earlier records wait for review, until basecamp connect
+release. Linux and macOS only.
+
+  basecamp connect status             what it heard and holds
+  basecamp connect doctor             what it needs to run
+  basecamp connect discard <id>       close a record without running it
+  basecamp connect release            clear the hold
+  basecamp connect shadow promote     make the shadow ledger the connector's, held
+  basecamp connect import <file>      apply a cutover reconciliation file`,
+		Example: `  basecamp connect setup -P agent --operator-profile me --serve 12345
+  basecamp connect -P agent
+  basecamp connect -P agent --project 12345 --shadow`,
+		Args: cobra.NoArgs,
+		Annotations: map[string]string{
+			"agent_notes": "Long-running; stdout is NDJSON pointer lines, logs on stderr. Not for interactive use.",
+			"stdout_wire": "connect",
+		},
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runConnect(cmd, &run)
+		},
+	}
+	addConnectRunFlags(cmd, &run)
+	cmd.AddCommand(newConnectSetupCmd(), newConnectShowCmd(), newConnectStatusCmd(), newConnectDoctorCmd(),
+		newConnectDiscardCmd(), newConnectReleaseCmd(), newConnectShadowCmd(), newConnectImportCmd())
+	return cmd
+}
+
+// newConnectShowCmd shows a profile's connect.json, read the way the
+// connector reads it: through setup.Load's safety checks, so a symlink, a
+// file someone else could have written, or anything oversized is refused
+// before a byte of it is shown.
+func newConnectShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show",
+		Short: "Show a profile's connector setup without changing it",
+		Long: `Show the connect.json a profile's setup wrote: the agent, the operator and
+trust mode, and each served project.
+
+The file is read through the same checks setup and the connector apply:
+it is refused, and nothing of it shown, when it is a symlink, is not a
+regular file, could have been changed by another user, or does not parse.
+Nothing is changed and nothing is fetched: show reads no credential and
+makes no request. To check readiness, run setup again.
+
+A profile that does not exist is refused before this runs, naming the
+profiles there are, as it is for every command; a profile that exists and
+has never been set up is reported as not found.
+
+Examples:
+  basecamp connect show -P agent
+  basecamp connect show -P agent --json`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app := appctx.FromContext(cmd.Context())
+			if app == nil {
+				return fmt.Errorf("app not initialized")
+			}
+			return runConnectShow(app)
+		},
+	}
+}
+
+func runConnectShow(app *appctx.App) error {
+	name := app.Config.ActiveProfile
+	if name == "" {
+		return output.ErrUsageHint("Show needs the agent's profile", "Pass -P/--profile <name>.")
+	}
+	if !isValidProfileName(name) {
+		return output.ErrUsage(fmt.Sprintf("Invalid profile name %q: use only letters, numbers, hyphens, and underscores", name))
+	}
+	path, err := setup.Path(config.GlobalConfigDir(), name)
+	if err != nil {
+		return output.ErrUsage(err.Error())
+	}
+	f, err := setup.Load(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return output.ErrNotFoundHint("connect.json for profile", name,
+			"The profile has not been set up. Set it up: basecamp connect setup -P "+richtext.ShellQuote(name)+" --operator-profile '<your profile>' --serve <project-id>")
+	case err != nil && runtime.GOOS == "windows":
+		return output.ErrUsageHint("connect.json cannot be used: "+setup.ErrorText(err),
+			"The connector's setup is not supported on Windows: this CLI cannot verify who can change connect.json there.")
+	case err != nil:
+		return output.ErrUsageHint("connect.json cannot be used: "+setup.ErrorText(err),
+			"Nothing of it was shown. Fix or remove "+richtext.SanitizeSingleLine(path)+", then run setup again.")
+	}
+	if f.Profile != name {
+		// A policy copied from another profile's directory is not this
+		// profile's, however valid it is on its own: setup refuses it too.
+		return output.ErrUsageHint(fmt.Sprintf("%s names profile %q, not %q", richtext.SanitizeSingleLine(path), f.Profile, name),
+			"Nothing of it was shown. Remove "+richtext.SanitizeSingleLine(path)+" and run setup again for this profile.")
+	}
+
+	// The generic object renderer drops nested maps, which is where the
+	// agent, the trust and the served projects live, so a person's formats get them
+	// flattened to one line each; JSON keeps the file's own shape.
+	markdown := app.Output.EffectiveFormat() == output.FormatMarkdown
+	return app.OK(connectShowResult{Path: path, File: f},
+		output.WithDisplayData(connectShowDisplay(path, f, markdown)),
+		output.WithSummary(fmt.Sprintf("Connector setup for profile %q: trust %s, %d served project(s)", name, f.Trust.Mode, len(f.Projects))))
+}
+
+// connectShowDisplay is show's data for a person: every setting connect.json
+// records as a flat field, one per served project. The file's own path is
+// shown exactly — quoted, or as a code span in Markdown — so nothing in it
+// renders as formatting or reaches a terminal as a control byte.
+func connectShowDisplay(path string, f setup.File, markdown bool) map[string]any {
+	exact := func(s string) string {
+		// strconv.Quote escapes controls and backslashes; "<" is escaped too,
+		// or the renderer would take a path holding "<b>" for HTML and
+		// rewrite it.
+		return strings.ReplaceAll(strconv.Quote(s), "<", `\x3c`)
+	}
+	if markdown {
+		exact = func(s string) string { return markdownCode(escapeControls(s)) }
+	}
+	agent := fmt.Sprintf("person %d (%s)", f.Agent.PersonID, f.Agent.Kind)
+	if f.Agent.IdentityID != 0 {
+		agent += fmt.Sprintf(", identity %d", f.Agent.IdentityID)
+	}
+	trust := string(f.Trust.Mode)
+	if len(f.Trust.AllowlistIDs) > 0 {
+		ids := make([]string, len(f.Trust.AllowlistIDs))
+		for i, id := range f.Trust.AllowlistIDs {
+			ids[i] = strconv.FormatInt(id, 10)
+		}
+		trust += ": people " + strings.Join(ids, ", ")
+	}
+	d := map[string]any{
+		"file":     exact(path),
+		"account":  f.AccountID,
+		"agent":    agent,
+		"operator": fmt.Sprintf("person %d", f.Trust.OperatorID),
+		"trust":    trust,
+		"projects": strconv.Itoa(len(f.Projects)) + " served",
+	}
+	for id, r := range f.Projects {
+		settings := "served"
+		if r.Class != "" {
+			settings += ", class " + r.Class
+		}
+		if r.WatchCompletions {
+			settings += ", watches completions"
+		}
+		d[fmt.Sprintf("project_%d", id)] = settings
+	}
+	return d
+}
+
+// escapeControls writes every control or non-printable rune in s, the
+// backslash and "<" (which the renderer would read as HTML) as a Go escape
+// (\x1b, \u009b, \\, \x3c), so a path can reach a
+// terminal or a pager without a single control byte and still reads exactly:
+// an escape in the output never stands for text the path already held.
+func escapeControls(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == '<' {
+			b.WriteString(`\x3c`)
+			continue
+		}
+		if r == '\\' || unicode.IsControl(r) || !unicode.IsPrint(r) {
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// markdownCode is s as a Markdown code span, fenced with one more backtick
+// than the longest run inside it so no backtick in s can close it.
+func markdownCode(s string) string {
+	longest, run := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	fence := strings.Repeat("`", longest+1)
+	return fence + " " + s + " " + fence
+}
+
+// connectShowResult is show's data: where the file is, and what it holds.
+type connectShowResult struct {
+	Path string `json:"path"`
+	setup.File
+}
+
+// connectSetupFlags are setup's flags, as typed.
+type connectSetupFlags struct {
+	expectIdentity string
+
+	operator        string
+	operatorProfile string
+
+	trust string
+	allow []string
+
+	serve   []string
+	classes []string
+	watch   []string
+	unwatch []string
+	unserve []string
+
+	// guided is the guided setup running this one: a setup that passes says
+	// so in a line, since the guided summary names the agent, its owner and
+	// its projects. A failure still lists every check. It only ever makes a
+	// connect.json, so it refuses one that appeared while it was asking.
+	guided bool
+	// shownAgent and shownAccount are the agent and account guided setup
+	// showed the person; setup refuses to save for any other (0 and "" when
+	// not guided).
+	shownAgent   int64
+	shownAccount string
+}
+
+func newConnectSetupCmd() *cobra.Command {
+	var f connectSetupFlags
+
+	cmd := &cobra.Command{
+		Use:   "setup",
+		Short: "Choose who may drive a connected agent, serve projects, and check readiness",
+		Long: `Set up the connector for the agent a profile holds: record the trusted
+operator, write connect.json, and check what can be checked before the
+connector runs.
+
+Credential. Setup does not obtain one; connect the profile first, then run
+setup against it:
+  basecamp auth agent connect -P agent                  # an Agent person
+  basecamp auth login -P bot --expect-identity <id>     # a bot user (v1)
+On the bot-user path pass --expect-identity to setup as well, so it can prove
+the login is the bot and not you; later runs remember it.
+
+Operator. The person whose instructions the agent follows, keyed on Person
+id. A personal agent's operator is its owner, whom Basecamp names in the
+agent's own profile, so no flag is needed for one. Otherwise name them by
+their own profile (--operator-profile, which proves who they are), or by id
+(--operator), which the agent must be able to read. With neither, setup keeps
+the operator connect.json already has; on a first setup of an agent with no
+owner, one of the two is required.
+
+Trust. operator (default): the operator alone. allowlist: the operator and
+the people passed with --allow. project: the operator and any non-client
+member of the event's project. Assignments are the operator's alone in every
+mode.
+
+Projects. connect.json is the local list of Basecamp projects this agent
+serves: --serve <project-id>, --unserve <project-id>. Nothing in a project it
+does not serve is handed off, and nobody is told. --watch-completions <project-id>
+makes the agent hear every trusted completion in that project without being
+assigned.
+
+No directory is associated with a project here: the session handling the
+requests chooses the repo for each one.
+
+connect.json is written owner-only and refused when anyone else could have
+changed it or a directory above it. Where this CLI cannot verify that
+(Windows), or where the filesystem holding the configuration directory
+cannot lock, setup refuses rather than write a trust file it cannot vouch
+for.
+
+Every check runs before connect.json is written, and it is written only
+when all of them pass. Exit status: usage for refused input, auth when the
+profile's credential is missing, unreadable, cannot be proven, or is not the
+agent it should be, not_ready when a readiness check failed. Setup never
+stores, replaces or removes a credential; a token due for renewal is renewed
+as by any command.
+
+Run setup again to change any of it; what you do not pass is kept.
+
+Guided. In a terminal, with none of the flags that set policy, setup walks
+you through instead: it connects this computer to your agent when it is not
+(or no longer) connected, takes your agent's owner as the operator, asks
+which of your agent's projects it works in (all of them by default), and
+writes connect.json, offering to set it up again when the one there can't
+be used or is for another agent. It ends by saying how to start the
+connector. Run it again any time: it takes the next step, or says
+everything is set.
+
+Examples:
+  basecamp connect setup                                # guided, in a terminal
+  basecamp auth agent connect -P agent
+  basecamp connect setup -P agent --serve 12345         # a personal agent: its owner operates it
+  basecamp connect setup -P agent --operator-profile me --serve 12345
+  basecamp connect setup -P agent --operator-profile me --trust allowlist --allow 111 --allow 222
+  basecamp connect setup -P bot --operator-profile me --expect-identity 4242 --serve 12345
+  basecamp connect setup -P agent --class 12345=internal`,
+		Annotations: map[string]string{AnnotationProfileMayCreate: "true"},
+		Args:        cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app := appctx.FromContext(cmd.Context())
+			if app == nil {
+				return fmt.Errorf("app not initialized")
+			}
+			if connectSetupGuided(cmd, app) {
+				return runGuidedConnectSetup(cmd, app, &f)
+			}
+			return runConnectSetup(cmd, app, &f)
+		},
+	}
+
+	fl := cmd.Flags()
+	fl.StringVar(&f.expectIdentity, "expect-identity", "", "Bot-user path: the identity id the profile's login must authenticate as")
+	fl.StringVar(&f.operator, "operator", "", "Person id of the operator the agent follows")
+	fl.StringVar(&f.operatorProfile, "operator-profile", "", "Profile whose identity is the operator")
+	fl.StringVar(&f.trust, "trust", "", "Who may drive the agent: operator, allowlist or project")
+	fl.StringArrayVar(&f.allow, "allow", nil, "Person id to trust besides the operator (repeatable; implies --trust allowlist)")
+	fl.StringArrayVar(&f.serve, "serve", nil, "Serve a Basecamp project: <project-id> (repeatable)")
+	fl.StringArrayVar(&f.unserve, "unserve", nil, "Stop serving a project (repeatable)")
+	fl.StringArrayVar(&f.classes, "class", nil, "Classify a served project: <project-id>=<class>, or <project-id>= to clear it (repeatable)")
+	fl.StringArrayVar(&f.watch, "watch-completions", nil, "Admit every trusted completion in a served project (repeatable)")
+	fl.StringArrayVar(&f.unwatch, "no-watch-completions", nil, "Stop watching a project's completions (repeatable)")
+	cmd.MarkFlagsMutuallyExclusive("operator", "operator-profile")
+
+	return cmd
+}
+
+func runConnectSetup(cmd *cobra.Command, app *appctx.App, f *connectSetupFlags) error {
+	ctx := cmd.Context()
+
+	name := app.Config.ActiveProfile
+	if name == "" {
+		return output.ErrUsageHint("Setup needs the agent's profile", "Pass -P/--profile <name>, a profile connected with `basecamp auth agent connect`.")
+	}
+	if !isValidProfileName(name) {
+		return output.ErrUsage(fmt.Sprintf("Invalid profile name %q: use only letters, numbers, hyphens, and underscores", name))
+	}
+	changes, err := f.changes()
+	if err != nil {
+		return err
+	}
+	expect, err := parseExpectIdentity(f.expectIdentity)
+	if err != nil {
+		return err
+	}
+	operatorID, err := parsePositiveID("--operator", f.operator)
+	if err != nil {
+		return err
+	}
+	if f.operatorProfile == name {
+		return output.ErrUsage("--operator-profile names the agent's own profile; the operator is a different person")
+	}
+
+	path, err := setup.Path(config.GlobalConfigDir(), name)
+	if err != nil {
+		return output.ErrUsage(err.Error())
+	}
+	// One setup per profile at a time: load, change and save are one step.
+	// The wait honors ctx, so a person who stops the command during
+	// contention is not made to sit out the whole of it.
+	unlock, err := setup.Lock(ctx, path)
+	if err != nil {
+		return classifyLockError(name, err)
+	}
+	defer unlock()
+
+	existing, err := setup.Load(path)
+	exists := err == nil
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		existing = setup.New(name)
+	case err != nil:
+		return output.ErrUsageHint("connect.json cannot be used: "+err.Error(),
+			"Nothing was changed. Fix or remove "+richtext.SanitizeSingleLine(path)+", then run setup again.")
+	}
+	if existing.Profile != name {
+		return output.ErrUsage(fmt.Sprintf("%s names profile %q, not %q", path, existing.Profile, name))
+	}
+	if os.Getenv("BASECAMP_TOKEN") != "" {
+		return errEnvTokenShadows("connect setup cannot check the agent while BASECAMP_TOKEN is set")
+	}
+	// Guided setup makes connect.json only where there was none. One written
+	// while it was asking is another setup's, and its trust may not be what
+	// guided setup told the person: it is left as it is.
+	if f.guided && exists {
+		return output.ErrUsageHint("This agent was set up by another command while setup was asking about it, so nothing was changed",
+			runGuidedSetupAgain(name))
+	}
+
+	// Everything refusable without the network is refused first.
+	next, err := setup.Apply(existing, changes)
+	if err != nil {
+		return output.ErrUsage(err.Error())
+	}
+	// With no operator named or recorded, a personal agent's operator is the
+	// person it works for, which Basecamp says in the agent's own profile.
+	// Anyone else is never guessed: that is refused below, after the read.
+	operatorFromOwner := operatorID == 0 && f.operatorProfile == "" && existing.Trust.OperatorID == 0
+	var operatorMgr *operatorProfile
+	if f.operatorProfile != "" {
+		if operatorMgr, err = operatorProfileManager(ctx, app, f.operatorProfile); err != nil {
+			return err
+		}
+	}
+	accountID, err := connectAccount(app, name)
+	if err != nil {
+		return err
+	}
+	if exists && !accountIDsEqual(existing.AccountID, accountID) {
+		return output.ErrUsageHint(
+			fmt.Sprintf("connect.json was set up in account %s, and profile %q is bound to account %s", existing.AccountID, name, accountID),
+			"Nothing was changed. Remove "+richtext.SanitizeSingleLine(path)+" to set this profile up afresh.")
+	}
+	kind, err := connectCredentialKind(ctx, app)
+	if err != nil {
+		return err
+	}
+	// The credential's own disagreement with connect.json comes first: it is
+	// the wrong credential whatever the flags say.
+	if exists && kind != "" && existing.Agent.Kind != kind {
+		return output.ErrAuth(fmt.Sprintf("connect.json was set up for a %s credential, and profile %q now holds a %s one; remove %s to set this profile up afresh",
+			existing.Agent.Kind, name, kind, richtext.SanitizeSingleLine(path)))
+	}
+	if err := refuseCredentialConflicts(name, path, kind, expect, exists, existing); err != nil {
+		return err
+	}
+	if kind == setup.KindBotUser {
+		switch {
+		case expect == 0:
+			expect = existing.Agent.IdentityID
+		case exists && existing.Agent.IdentityID != 0 && expect != existing.Agent.IdentityID:
+			// Rebinding the file to another bot is a deliberate act, not a
+			// flag: connect.json's trust was recorded for the agent it names.
+			return output.ErrAuth(fmt.Sprintf(
+				"connect.json is set up for identity %d, and --expect-identity names %d; remove %s to set this profile up for another bot",
+				existing.Agent.IdentityID, expect, richtext.SanitizeSingleLine(path)))
+		}
+	}
+
+	var checks []setup.Check
+
+	// Token: one snapshot of the credential and the token it yields, which
+	// every read below spends. A credential another process stores under
+	// the profile while setup runs is not what setup checked, so it is
+	// compared again before anything is written.
+	token, err := app.Auth.AccessToken(ctx)
+	if err != nil {
+		return output.ErrAuth(fmt.Sprintf("Profile %q holds a credential that does not produce a token: %s", name, setup.ErrorText(err)))
+	}
+	creds, err := app.Auth.GetStore().LoadContext(ctx, app.Auth.CredentialKey())
+	if err != nil {
+		return output.ErrAuth("The stored credential could not be read: " + setup.ErrorText(err))
+	}
+	if creds.AccessToken != token {
+		return errCredentialChanged(name)
+	}
+	provider := &basecamp.StaticTokenProvider{Token: token}
+	checks = append(checks, setup.Check{Name: "Token", Status: setup.StatusPass, Message: "The profile's credential yields a token"})
+
+	// Identity.
+	client := connectSDKClient(app, provider)
+	reader := setup.SDKReader{Client: client.ForAccount(accountID)}
+	me, err := reader.Me(ctx)
+	if err != nil {
+		return output.ErrAuth(fmt.Sprintf("Could not read who profile %q is in account %s: %s", name, accountID, setup.ErrorText(err)))
+	}
+	// Guided setup asked its questions about one agent; a credential stored
+	// under the profile since, for another, is not what the person answered
+	// for (Codex on #794).
+	if f.shownAgent != 0 && (me.ID != f.shownAgent || accountID != f.shownAccount) {
+		return output.ErrUsageHint("This computer was connected to a different agent while setup was asking about it, so nothing was set up",
+			"Run basecamp connect setup again.")
+	}
+	identityCheck, err := checkConnectIdentity(ctx, app, client, kind, creds.OAuthType, me, expect)
+	if err != nil {
+		return err
+	}
+	checks = append(checks, identityCheck)
+	if exists && existing.Agent.PersonID != me.ID {
+		return output.ErrAuth(fmt.Sprintf("connect.json was set up for agent person %d, and profile %q now authenticates as person %d; if this is a different agent on purpose, remove %s and run setup again",
+			existing.Agent.PersonID, name, me.ID, richtext.SanitizeSingleLine(path)))
+	}
+	checks = append(checks, setup.ScopeCheck(creds.OAuthType, creds.Scope))
+
+	// Trust, verified before anything is written: connect.json is the trust
+	// anchor, and nobody in it is recorded unverified. People are read
+	// through the operator's own credential when there is one, since
+	// Basecamp refuses person reads to an Agent identity today.
+	trust := setup.Trust{
+		Allowlist:       next.Trust.AllowlistIDs,
+		OperatorProfile: f.operatorProfile,
+	}
+	if exists {
+		trust.Recorded = existing.Trust
+	}
+	people := setup.Reader(reader)
+	switch {
+	case operatorFromOwner:
+		owner, ok, err := readAgentOwner(ctx, client.ForAccount(accountID), kind)
+		if err != nil {
+			return output.ErrAuth(fmt.Sprintf("Could not read who agent %q works for: %s", me.Name, setup.ErrorText(err)))
+		}
+		if !ok {
+			return errOperatorRequired()
+		}
+		trust.Operator = owner
+		trust.OperatorIsOwner = true
+	case operatorMgr != nil:
+		op, opReader, err := resolveOperatorProfile(ctx, operatorMgr, f.operatorProfile, accountID)
+		if err != nil {
+			return err
+		}
+		trust.Operator = op
+		people = opReader
+	default:
+		if operatorID == 0 {
+			operatorID = existing.Trust.OperatorID
+		}
+		trust.Operator = setup.Person{ID: operatorID}
+	}
+	trustChecks := setup.VerifyTrust(ctx, people, trust, me.ID)
+	for _, c := range trustChecks {
+		if c.Status == setup.StatusFail {
+			return output.ErrUsageHint("Trust was refused, and nothing was written: "+c.Name+": "+c.Message, c.Hint)
+		}
+	}
+	checks = append(checks, trustChecks...)
+
+	next.AccountID = accountID
+	next.Agent = setup.Agent{PersonID: me.ID, Kind: kind}
+	if kind == setup.KindBotUser {
+		next.Agent.IdentityID = expect
+	}
+	next.Trust.OperatorID = trust.Operator.ID
+	if err := next.Validate(); err != nil {
+		return output.ErrUsage("connect.json was not written: " + err.Error())
+	}
+
+	// Every check runs before connect.json is written, and it is written
+	// only when all of them pass: a setup that is not ready changes nothing.
+	report := &setup.Report{
+		Path:          path,
+		Profile:       name,
+		AccountID:     accountID,
+		AgentPersonID: me.ID,
+		AgentKind:     kind,
+		OperatorID:    next.Trust.OperatorID,
+		TrustMode:     string(next.Trust.Mode),
+		Projects:      len(next.Projects),
+	}
+	report.Add(checks...)
+	report.Add(setup.TicketCheck(ctx, reader, kind))
+	report.Add(setup.ProjectChecks(ctx, reader, next, !exists)...)
+	// A command the person stopped did not find the connector unready: it
+	// found nothing, and says so as an interruption.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	w := cmd.OutOrStdout()
+	styled := app.Output.EffectiveFormat() == output.FormatStyled
+	title := "Connector setup for profile " + strconv.Quote(name)
+	if len(report.Failed()) > 0 {
+		if styled {
+			renderChecksStyled(w, title, summarizeChecks(asDoctorChecks(report.Checks())))
+		}
+		return errConnectorNotReady(report)
+	}
+
+	// The write and the last look at the credential are one step under the
+	// credential key's own lock, which every login, refresh and import
+	// takes: no other command can replace the profile's credential between
+	// the check and the write. What is written names the identity that
+	// credential authenticates as, and connect.json's VerifyAgent is what
+	// the connector re-checks at start-up, so a credential replaced later
+	// stops it rather than making it act as the wrong agent.
+	saveErr := app.Auth.GetStore().WithCredential(ctx, app.Auth.CredentialKey(), func(held auth.HeldCredential) error {
+		stored, _, ok := auth.Held(held)
+		if !ok || !sameCredential(creds, stored) {
+			return errCredentialChanged(name)
+		}
+		if err := next.VerifyAgent(kind, me.ID, expect); err != nil {
+			return output.ErrAuth(err.Error())
+		}
+		return setup.Save(held, path, next)
+	})
+	if saveErr != nil {
+		return classifyWriteError(name, saveErr)
+	}
+	report.Written = true
+
+	summary := summarizeChecks(asDoctorChecks(report.Checks()))
+	if !report.Ready() {
+		return errConnectorNotReady(report)
+	}
+	switch {
+	case styled && f.guided:
+		renderGuidedChecks(w, report.Checks())
+		return nil
+	case styled:
+		renderChecksStyled(w, title, summary)
+		fmt.Fprintf(w, "  connect.json written: %s\n\n", richtext.SanitizeSingleLine(path))
+		return nil
+	}
+	return app.OK(report, output.WithSummary("connect.json written; "+summary.Summary()))
+}
+
+// classifyWriteError puts the last step's failures in the command's exit
+// contract: a credential that is gone or unreadable is auth, another
+// process holding the profile's credential or the profile's policy lock is busy, a
+// connect.json nobody else may change is usage.
+func classifyWriteError(name string, err error) error {
+	var apiErr *output.Error
+	profile := richtext.ShellQuote(name)
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// A person who stopped the command, or a deadline: the run ended,
+		// it was not misused, and nothing was written.
+		return err
+	case errors.Is(err, setup.ErrSetupRunning):
+		return errBusy(name, err)
+	case errors.As(err, &apiErr) && apiErr.Code == output.CodeRateLimit:
+		// The credential store reports contention on its own key as a
+		// retryable rate limit; here that is the profile being busy.
+		return errBusy(name, err)
+	case errors.As(err, &apiErr):
+		// Already in the contract: the credential store reports contention
+		// as a retryable rate_limit, and setup's own refusals are typed.
+		return err
+	case errors.Is(err, auth.ErrNoCredential):
+		return &output.Error{Code: output.CodeAuth,
+			Message: fmt.Sprintf("Profile %q's credential was removed while setup was checking it, so nothing was written", name),
+			Hint:    "Connect the agent again: basecamp auth agent connect -P " + profile}
+	case errors.Is(err, auth.ErrInvalidCredentials):
+		return &output.Error{Code: output.CodeAuth,
+			Message: fmt.Sprintf("Profile %q's stored credential could not be read, so nothing was written", name),
+			Hint:    "Connect the agent again: basecamp auth agent connect -P " + profile}
+	case errors.Is(err, setup.ErrNotPrivate):
+		return output.ErrUsageHint("connect.json was not written: "+err.Error(), "Setup writes connect.json only where nobody else can change it.")
+	}
+	return output.ErrUsage("connect.json was not written: " + err.Error())
+}
+
+// classifyLockError puts a refused lock in the command's exit contract:
+// another setup on the profile is busy, a host that cannot lock at all is
+// lock_unavailable, and a connect.json nobody else may change stays usage.
+func classifyLockError(name string, err error) error {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// A person who stopped the command, or a deadline, while waiting for
+		// the lock: the run ended, nothing was locked, and nothing was
+		// changed. Reported as itself rather than dressed as a lock failure.
+		return err
+	case errors.Is(err, setup.ErrSetupRunning):
+		return errBusy(name, err)
+	case errors.Is(err, setup.ErrLockUnavailable):
+		return &output.Error{Code: output.CodeLockUnavailable,
+			Message: fmt.Sprintf("This host cannot lock profile %q's connector policy: %s", name, setup.ErrorText(err)),
+			Hint: "Nothing was changed. Other commands still work; connector setup is what needs the lock, so point XDG_CONFIG_HOME at a filesystem that supports locking " +
+				"(some network and FUSE mounts do not)."}
+	case errors.Is(err, setup.ErrNotPrivate):
+		return output.ErrUsageHint(err.Error(), "Setup locks and writes connect.json only where nobody else can change it.")
+	}
+	return output.ErrUsage(err.Error())
+}
+
+func errBusy(name string, err error) error {
+	return &output.Error{Code: output.CodeBusy, Retryable: true,
+		Message: fmt.Sprintf("Another command is working on profile %q right now, so nothing was changed: %s", name, setup.ErrorText(err)),
+		Hint:    "Nothing is wrong with the profile. Run setup again when it has finished."}
+}
+
+// sameCredential reports whether two loads of a profile's credential are the
+// same credential with the same token: what setup checked is what is stored.
+func sameCredential(a, b *auth.Credentials) bool {
+	return a != nil && b != nil &&
+		a.OAuthType == b.OAuthType && a.ClientID == b.ClientID && a.Scope == b.Scope &&
+		a.AccessToken == b.AccessToken && a.RefreshToken == b.RefreshToken
+}
+
+func errCredentialChanged(name string) error {
+	return &output.Error{Code: output.CodeAuth,
+		Message: fmt.Sprintf("Profile %q's credential changed while setup was checking it, so nothing was written", name),
+		Hint:    "Another command stored or renewed a credential under the profile. Run setup again to check the one it holds now."}
+}
+
+// codeNotReady is the error code for a setup whose checks failed: the
+// connector would not run, and connect.json was not written.
+const codeNotReady = "not_ready"
+
+// errConnectorNotReady reports a report that is not ready as the command's
+// error, so a script or an agent reading the exit status sees what a person
+// sees: every check that failed, by name.
+func errConnectorNotReady(report *setup.Report) error {
+	failures := report.Failed()
+	failed := make([]string, 0, len(failures))
+	hint := ""
+	for _, c := range failures {
+		failed = append(failed, c.Name+": "+c.Message)
+		if hint == "" {
+			hint = c.Hint
+		}
+	}
+	if hint == "" {
+		hint = "Fix what failed and run setup again."
+	}
+	return &output.Error{
+		Code:    codeNotReady,
+		Message: fmt.Sprintf("The connector is not ready, so %s was not written. %s", richtext.SanitizeSingleLine(report.Path), strings.Join(failed, "; ")),
+		Hint:    hint,
+	}
+}
+
+// canonicalAccount is the account id as a number spells it, the spelling
+// the connector's instance lock uses.
+func canonicalAccount(raw string) (string, error) {
+	if err := requireNumericAccount(raw); err != nil {
+		return "", err
+	}
+	n, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || n == 0 {
+		return "", output.ErrUsage(fmt.Sprintf("Invalid account ID %q", raw))
+	}
+	return strconv.FormatUint(n, 10), nil
+}
+
+// changes turns setup's flags into the changes connect.json takes.
+func (f *connectSetupFlags) changes() (setup.Changes, error) {
+	var ch setup.Changes
+	if f.trust != "" {
+		ch.Trust = admission.TrustMode(f.trust)
+		switch ch.Trust {
+		case admission.TrustOperator, admission.TrustAllowlist, admission.TrustProject:
+		default:
+			return ch, output.ErrUsage(fmt.Sprintf("Invalid --trust %q: use operator, allowlist or project", f.trust))
+		}
+	}
+	for _, raw := range f.allow {
+		for part := range strings.SplitSeq(raw, ",") {
+			id, err := parsePositiveID("--allow", strings.TrimSpace(part))
+			if err != nil || id == 0 {
+				return ch, output.ErrUsage(fmt.Sprintf("Invalid --allow %q: expected a Person id", raw))
+			}
+			ch.Allow = append(ch.Allow, id)
+		}
+	}
+
+	for _, raw := range f.serve {
+		id, err := parsePositiveID("--serve", raw)
+		if err != nil || id == 0 {
+			return ch, output.ErrUsage(fmt.Sprintf("Invalid --serve %q: expected a project id", raw))
+		}
+		ch.Serve = append(ch.Serve, id)
+	}
+
+	var err error
+	if ch.Classes, err = parseProjectPairsAllowEmpty("--class", f.classes); err != nil {
+		return ch, err
+	}
+	for _, list := range []struct {
+		flag string
+		raw  []string
+		on   bool
+	}{{"--watch-completions", f.watch, true}, {"--no-watch-completions", f.unwatch, false}} {
+		for _, raw := range list.raw {
+			id, err := parsePositiveID(list.flag, raw)
+			if err != nil || id == 0 {
+				return ch, output.ErrUsage(fmt.Sprintf("Invalid %s %q: expected a project id", list.flag, raw))
+			}
+			if ch.WatchCompletions == nil {
+				ch.WatchCompletions = map[int64]bool{}
+			}
+			if prev, seen := ch.WatchCompletions[id]; seen && prev != list.on {
+				return ch, output.ErrUsage(fmt.Sprintf("Project %d is given both --watch-completions and --no-watch-completions", id))
+			}
+			ch.WatchCompletions[id] = list.on
+		}
+	}
+	for _, raw := range f.unserve {
+		id, err := parsePositiveID("--unserve", raw)
+		if err != nil || id == 0 {
+			return ch, output.ErrUsage(fmt.Sprintf("Invalid --unserve %q: expected a project id", raw))
+		}
+		ch.Remove = append(ch.Remove, id)
+	}
+
+	return ch, nil
+}
+
+// parseProjectPairsAllowEmpty parses repeatable <project-id>=<value> flags.
+// <project-id>= (an empty value) is meaningful: it clears the setting. The
+// only such flag left is --class, and only it ever had an empty value to
+// mean anything.
+func parseProjectPairsAllowEmpty(flag string, raw []string) (map[int64]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make(map[int64]string, len(raw))
+	for _, pair := range raw {
+		idText, value, ok := strings.Cut(pair, "=")
+		id, err := parsePositiveID(flag, strings.TrimSpace(idText))
+		if !ok || err != nil || id == 0 {
+			return nil, output.ErrUsage(fmt.Sprintf("Invalid %s %q: expected <project-id>=<value>", flag, pair))
+		}
+		if _, dup := out[id]; dup {
+			return nil, output.ErrUsage(fmt.Sprintf("%s names project %d twice", flag, id))
+		}
+		out[id] = value
+	}
+	return out, nil
+}
+
+// parsePositiveID parses a numeric id flag: 0 when absent.
+func parsePositiveID(flag, raw string) (int64, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, output.ErrUsage(fmt.Sprintf("Invalid %s %q: expected a numeric id", flag, raw))
+	}
+	return id, nil
+}
+
+// refuseCredentialConflicts refuses a profile setup cannot use as it is:
+// one with no credential (setup does not obtain one), --expect-identity
+// against an Agent's credential or connect.json, and a person's login with
+// nothing pinning it to the bot.
+func refuseCredentialConflicts(name, path, held string, expect int64, exists bool, existing setup.File) error {
+	profile := richtext.ShellQuote(name)
+	switch {
+	// What connect.json already says comes first: a remediation that the
+	// existing file would refuse anyway is no remediation.
+	case expect != 0 && exists && existing.Agent.Kind == setup.KindAgent:
+		return output.ErrUsageHint("--expect-identity is for the bot-user path, and connect.json was set up for an Agent",
+			fmt.Sprintf("Connect the agent again (basecamp auth agent connect -P %s) and drop --expect-identity, or remove %s to set this profile up as a bot user.",
+				profile, richtext.SanitizeSingleLine(path)))
+	case held == "" && (expect != 0 || (exists && existing.Agent.Kind == setup.KindBotUser)):
+		identity := expect
+		if identity == 0 {
+			identity = existing.Agent.IdentityID
+		}
+		return &output.Error{Code: output.CodeAuth,
+			Message: fmt.Sprintf("Profile %q holds no credential", name),
+			Hint:    fmt.Sprintf("Log the bot in first: basecamp auth login -P %s --expect-identity %d, then run setup again.", profile, identity)}
+	case held == "":
+		return &output.Error{Code: output.CodeAuth,
+			Message: fmt.Sprintf("Profile %q holds no credential", name),
+			Hint:    fmt.Sprintf("Connect the agent first: basecamp auth agent connect -P %s, then run setup again.", profile)}
+	case expect != 0 && held == setup.KindAgent:
+		return output.ErrUsageHint("--expect-identity is for the bot-user path, and profile "+strconv.Quote(name)+" holds an Agent's credential, which has no identity",
+			fmt.Sprintf("Drop --expect-identity, or log a bot in under another profile: basecamp auth login -P <bot-profile> --expect-identity %d.", expect))
+	case held == setup.KindBotUser && expect == 0 && existing.Agent.IdentityID == 0:
+		return output.ErrUsageHint(fmt.Sprintf("Profile %q holds a person's login, not an Agent's credential", name),
+			"On the bot-user path pass --expect-identity <the bot's identity id>, so setup can prove this login is the bot and not you.")
+	}
+	return nil
+}
+
+// connectAccount is the account setup works in: the one the agent's
+// profile is bound to, which is where its credential was connected. It is
+// never a config-wide default, and an --account or BASECAMP_ACCOUNT_ID that
+// names another account is refused rather than preferred.
+func connectAccount(app *appctx.App, name string) (string, error) {
+	p := app.Config.Profiles[name]
+	if p == nil {
+		return "", output.ErrUsageHint(fmt.Sprintf("Profile %q does not exist", name),
+			"Connect the agent first: basecamp auth agent connect -P "+richtext.ShellQuote(name))
+	}
+	bound, err := canonicalAccount(p.AccountID)
+	if err != nil {
+		// An entry that names an account nothing can use is not an unbound
+		// profile: say what is wrong with the account it does name.
+		if p.AccountID != "" {
+			where := "the config file that defines the profile"
+			if path := profileFieldFile(app.Config, name, "account_id"); path != "" {
+				where = "the profile's entry in " + richtext.SanitizeSingleLine(path)
+			}
+			return "", output.ErrUsageHint(
+				fmt.Sprintf("Profile %q names account %q, which is not an account ID", name, p.AccountID),
+				"Correct account_id in "+where+".")
+		}
+		return "", unboundProfileError(app.Config, name)
+	}
+	if accountGivenExplicitly(app) && !accountIDsEqual(app.Config.AccountID, bound) {
+		return "", output.ErrUsageHint(
+			fmt.Sprintf("Profile %q is bound to account %s%s, and this command named account %s", name, bound, boundIn(app.Config, name), app.Config.AccountID),
+			"Setup works in the profile's own account. Drop --account (or BASECAMP_ACCOUNT_ID).")
+	}
+	return bound, nil
+}
+
+// unboundProfileError refuses a profile that names no account, with the
+// remedy that will work for this one.
+//
+// No command binds an account on its own — `profile` has none for it. The
+// account is written by a command that stores a credential: `auth agent
+// connect`, which takes the Agent's own account, and the headless logins
+// (`auth login --with-token` or `--with-client-credentials` with --account).
+// A bot user logged in through the browser, which binds nothing, so for a
+// bot that already has its credential the account goes into its config entry
+// by hand rather than through another login.
+//
+// Those commands all write the global config's entry, which does not bind
+// every profile: globalBindingBlocker, the question they ask themselves,
+// says when it would not, and names the file to change instead.
+func unboundProfileError(cfg *config.Config, name string) error {
+	message := fmt.Sprintf("Profile %q is not bound to an account", name)
+	if blocker := globalBindingBlocker(cfg, name); blocker != "" {
+		return output.ErrUsageHint(message, blocker+".")
+	}
+	global := filepath.Join(config.GlobalConfigDir(), "config.json")
+	return output.ErrUsageHint(message,
+		"For an Agent, connecting it binds its own account: basecamp auth agent connect -P "+richtext.ShellQuote(name)+
+			". A bot user's browser login binds none, so for a bot add account_id to the profile's entry in "+richtext.SanitizeSingleLine(global)+".")
+}
+
+// connectCredentialKind is the kind of credential the active profile holds,
+// "" for none. A store that cannot be read is an error, not "none".
+func connectCredentialKind(ctx context.Context, app *appctx.App) (string, error) {
+	return credentialKindOf(ctx, app.Auth)
+}
+
+func credentialKindOf(ctx context.Context, mgr *auth.Manager) (string, error) {
+	creds, err := mgr.GetStore().LoadContext(ctx, mgr.CredentialKey())
+	switch {
+	case errors.Is(err, auth.ErrNoCredential):
+		return "", nil
+	case err != nil:
+		return "", output.ErrAuth("The stored credential could not be read: " + setup.ErrorText(err))
+	case creds.OAuthType == "agent":
+		return setup.KindAgent, nil
+	default:
+		return setup.KindBotUser, nil
+	}
+}
+
+// checkConnectIdentity proves the profile is the agent it is meant to be.
+// An Agent credential must read back as an Agent person. A bot user's login
+// must be the identity --expect-identity pinned, and must not be an Agent.
+func checkConnectIdentity(ctx context.Context, app *appctx.App, client *basecamp.Client, kind, oauthType string, me setup.Person, expect int64) (setup.Check, error) {
+	c := setup.Check{Name: "Identity", Status: setup.StatusPass}
+	if me.ID <= 0 {
+		return c, output.ErrAuth(fmt.Sprintf("The profile's credential read back no person id (%d); it cannot be the agent", me.ID))
+	}
+	switch kind {
+	case setup.KindAgent:
+		if me.PersonableType != setup.PersonableAgent {
+			return c, output.ErrAuth(fmt.Sprintf("The agent credential authenticates as person %d, whose type is %q, not an Agent", me.ID, me.PersonableType))
+		}
+		c.Message = fmt.Sprintf("Agent person %d", me.ID)
+	default:
+		if me.PersonableType == setup.PersonableAgent {
+			return c, output.ErrAuth(fmt.Sprintf("Person %d is an Agent, but the profile holds a person's login", me.ID))
+		}
+		endpoint, err := app.Auth.AuthorizationEndpointFor(oauthType)
+		if err != nil {
+			return c, output.ErrAuth("Could not locate the login's identity endpoint: " + setup.ErrorText(err))
+		}
+		info, err := client.Authorization().GetInfo(ctx, &basecamp.GetInfoOptions{Endpoint: endpoint, FilterProduct: "bc3"})
+		if err != nil {
+			return c, output.ErrAuth(fmt.Sprintf("Could not read the login's identity: %s", setup.ErrorText(err)))
+		}
+		if info.Identity.ID != expect {
+			return c, output.ErrAuth(fmt.Sprintf("The profile's login is identity %d, not the %d --expect-identity names; nothing was written", info.Identity.ID, expect))
+		}
+		c.Message = fmt.Sprintf("Bot user person %d (identity %d)", me.ID, expect)
+	}
+	return c, nil
+}
+
+// profileConfig is the configuration a named profile runs under, in the
+// CLI's own precedence: environment over profile over file over defaults.
+// It is root's chain for the active profile (ApplyProfile, then LoadFromEnv
+// re-applied over it), minus this invocation's flags, which name the agent's
+// run and not the operator's profile.
+func profileConfig(profile string) (*config.Config, error) {
+	cfg, err := config.Load(config.FlagOverrides{})
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := cfg.Profiles[profile]; !ok {
+		return nil, output.ErrUsage(fmt.Sprintf("Operator profile %q does not exist", profile))
+	}
+	if err := cfg.ApplyProfile(profile); err != nil {
+		return nil, err
+	}
+	if err := config.LoadFromEnv(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// operatorProfileManager checks, without the network, that the operator's
+// profile can name the operator: it exists, is on the agent's Basecamp, and
+// holds a person's credential.
+func operatorProfileManager(ctx context.Context, app *appctx.App, profile string) (*operatorProfile, error) {
+	cfg, err := profileConfig(profile)
+	if err != nil {
+		return nil, err
+	}
+	if config.NormalizeBaseURL(cfg.BaseURL) != config.NormalizeBaseURL(app.Config.BaseURL) {
+		return nil, output.ErrUsage(fmt.Sprintf("Operator profile %q is on %s, and the agent is on %s", profile, cfg.BaseURL, app.Config.BaseURL))
+	}
+	mgr := auth.NewManager(cfg, nil)
+	if store := app.Auth.GetStore(); store != nil {
+		mgr.SetStore(store)
+	}
+	switch kind, err := credentialKindOf(ctx, mgr); {
+	case err != nil:
+		return nil, err
+	case kind == "":
+		return nil, output.ErrUsageHint(fmt.Sprintf("Operator profile %q holds no credential", profile), "Log in: basecamp auth login -P "+richtext.ShellQuote(profile))
+	case kind == setup.KindAgent:
+		return nil, output.ErrUsage(fmt.Sprintf("Operator profile %q holds an Agent's credential; an operator is a person", profile))
+	}
+	return &operatorProfile{mgr: mgr, baseURL: cfg.BaseURL}, nil
+}
+
+// operatorProfile is the operator's own credential, checked and ready to read.
+type operatorProfile struct {
+	mgr     *auth.Manager
+	baseURL string
+}
+
+// resolveOperatorProfile reads the operator's person in the agent's account
+// through the operator's own credential, which proves who they are in a way
+// a typed id cannot.
+func resolveOperatorProfile(ctx context.Context, op *operatorProfile, profile, accountID string) (setup.Person, setup.Reader, error) {
+	client := connectSDKClientFor(op.baseURL, &managerTokens{mgr: op.mgr})
+	reader := setup.SDKReader{Client: client.ForAccount(accountID)}
+	me, err := reader.Me(ctx)
+	if err != nil {
+		return setup.Person{}, nil, output.ErrAuth(fmt.Sprintf("Could not read who operator profile %q is in account %s: %s", profile, accountID, setup.ErrorText(err)))
+	}
+	if me.ID <= 0 {
+		return setup.Person{}, nil, output.ErrAuth(fmt.Sprintf("Operator profile %q reported no person id", profile))
+	}
+	return me, reader, nil
+}
+
+func asDoctorChecks(in []setup.Check) []Check {
+	out := make([]Check, len(in))
+	for i, c := range in {
+		out[i] = Check(c)
+	}
+	return out
+}
+
+// managerTokens is a TokenProvider over an auth manager.
+type managerTokens struct{ mgr *auth.Manager }
+
+// AccessToken hands a client a renewal failure it can retry in the SDK's
+// own error type, so the SDK retries it as it would any 429 or 5xx; every
+// other failure is the CLI's own, as it was.
+func (t *managerTokens) AccessToken(ctx context.Context) (string, error) {
+	token, err := t.mgr.AccessToken(ctx)
+	if e := tokenFailureInSDKTerms(err); e != nil && e.Retryable && e.HTTPStatus != 0 {
+		return token, e
+	}
+	return token, err
+}
+
+// feedTokens is the token provider the event feed reads through. The feed
+// classifies a failure by the SDK's error type alone, and reads anything it
+// does not recognize its own way, so every failure is handed over already
+// classified by tokenRetry — the same rule a starting connector waits by,
+// so the two cannot drift apart.
+type feedTokens struct {
+	managerTokens
+	// log says a wait the server named past the cap, once per answer that
+	// named it; nothing is said when nil.
+	log func(string)
+}
+
+func (t *feedTokens) AccessToken(ctx context.Context) (string, error) {
+	token, err := t.mgr.AccessToken(ctx)
+	e := tokenFailureInSDKTerms(err)
+	if e == nil {
+		return token, err
+	}
+	if named, wait := serverNamedWait(err), time.Duration(e.RetryAfter)*time.Second; e.Retryable && named > wait && t.log != nil {
+		t.log(connectWaitLine(output.AsError(err).Message, named, wait))
+	}
+	return token, e
+}
+
+// tokenFailureInSDKTerms is a failed renewal as the SDK's error, classified
+// by tokenRetry, or nil when there was no failure. A retryable one keeps
+// its status and any wait it named — a 429, a 5xx — or, with no status, is
+// a network failure; the feed backs off and carries on either way. One that
+// cannot be retried carries no status at all, so the feed ends on it rather
+// than counting it toward its own authorization threshold; a refused
+// credential is still recognizable down the chain as the disconnect it is.
+// The CLI's error stays the cause, so its words are still the ones rendered.
+func tokenFailureInSDKTerms(err error) *basecamp.Error {
+	if err == nil {
+		return nil
+	}
+	asked, retryable := tokenRetry(err)
+	e := &basecamp.Error{Code: basecamp.CodeAPI, Message: err.Error(), Retryable: retryable, Cause: err}
+	if !retryable {
+		return e
+	}
+	var cliErr *output.Error
+	if errors.As(err, &cliErr) {
+		e.HTTPStatus = cliErr.HTTPStatus
+	}
+	e.RetryAfter = int(asked / time.Second)
+	switch e.HTTPStatus {
+	case http.StatusTooManyRequests:
+		e.Code = basecamp.CodeRateLimit
+	case 0:
+		e.Code = basecamp.CodeNetwork
+	}
+	return e
+}
+
+// tokenRetry is the one rule for a failed token renewal, which the running
+// feed (through feedTokens) and a starting connector both go by: whether it
+// can be retried, and the wait the endpoint named, zero when it named none.
+//
+// A response that arrived is classified by its status, whatever became of
+// its body: a 429 or a 5xx can be retried, a refusal cannot — the CLI's own
+// verdict says which. A request that got no response — a connection
+// refused, reset or dropped, a name that did not resolve, a timeout, a TLS
+// handshake or a proxy that failed — is a network failure, and is retried
+// too, a misconfigured one included: the process stays alive and says why,
+// where exiting would only have a supervisor give up sooner, knowing less.
+// Two things are never retried, because no wait changes them: a URL the
+// egress policy refused, and one the client could not send at all. The
+// wait is what the server named, never longer than auth.MaxServerWait.
+func tokenRetry(err error) (time.Duration, bool) {
+	if errors.Is(err, surfguard.ErrBlocked) || cannotBeSent(err) {
+		return 0, false
+	}
+	var cliErr *output.Error
+	switch {
+	case errors.As(err, &cliErr) && cliErr.Retryable:
+		// Exactly what the server named, never longer than the one cap,
+		// or nothing, which leaves it to the backoff: never a default
+		// wait from anywhere else.
+		return min(serverNamedWait(err), auth.MaxServerWait), true
+	case gotNoResponse(err):
+		return 0, true
+	}
+	return 0, false
+}
+
+// serverNamedWait is the wait the server named for err, as it named it:
+// the agent mint's own, or that of the SDK error an OAuth refresh carries.
+// Every SDK error down the chain is read, not only the first, since the
+// first may be this package's own capped wrapping of the one the server
+// gave. Zero when it named none.
+func serverNamedWait(err error) time.Duration {
+	seconds := auth.NamedWait(err)
+	for next := err; next != nil; {
+		var sdkErr *basecamp.Error
+		if !errors.As(next, &sdkErr) {
+			break
+		}
+		seconds = max(seconds, sdkErr.RetryAfter)
+		next = sdkErr.Cause
+	}
+	return time.Duration(max(seconds, 0)) * time.Second
+}
+
+// gotNoResponse reports a request that failed on the way, with no response
+// to classify.
+func gotNoResponse(err error) bool {
+	var urlErr *url.Error
+	var netErr net.Error
+	return errors.As(err, &urlErr) || errors.As(err, &netErr)
+}
+
+// cannotBeSent reports a request whose URL the client cannot send: not an
+// absolute http or https URL with a host. It never reached the network.
+func cannotBeSent(err error) bool {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return false
+	}
+	u, parseErr := url.Parse(urlErr.URL)
+	return parseErr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == ""
+}
+
+// connectSDKClient is the client setup reads through: no request hooks, no
+// debug logger and no cache. The hooks and logger print request URLs, and
+// the feed's URLs carry positions and tickets; -v on setup must not be a way
+// to print either.
+func connectSDKClient(app *appctx.App, tokens basecamp.TokenProvider) *basecamp.Client {
+	return connectSDKClientFor(app.Config.BaseURL, tokens)
+}
+
+func connectSDKClientFor(baseURL string, tokens basecamp.TokenProvider) *basecamp.Client {
+	return basecamp.NewClient(&basecamp.Config{BaseURL: baseURL}, tokens, connectSDKOptions()...)
+}
+
+// connectSDKOptions are the only options setup's clients get: a transport
+// and a user agent, never hooks or a logger.
+func connectSDKOptions() []basecamp.ClientOption {
+	return []basecamp.ClientOption{
+		basecamp.WithTransport(http.DefaultTransport),
+		basecamp.WithUserAgent(version.UserAgent() + " " + basecamp.DefaultUserAgent),
+	}
+}

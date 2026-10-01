@@ -433,6 +433,11 @@ func convertSDKError(err error) error {
 		return nil
 	}
 
+	// A gate that queued and gave up says which limit, how long, and what to do
+	if gateErr := output.AsGateError(err); gateErr != nil {
+		return gateErr
+	}
+
 	// Handle resilience sentinel errors (use errors.Is for wrapped errors)
 	if errors.Is(err, basecamp.ErrRateLimited) {
 		return &output.Error{
@@ -462,14 +467,14 @@ func convertSDKError(err error) error {
 	// Handle structured SDK errors
 	var sdkErr *basecamp.Error
 	if errors.As(err, &sdkErr) {
-		return &output.Error{
+		return output.WithAuthHint(&output.Error{
 			Code:       sdkErr.Code,
 			Message:    sdkErr.Message,
 			Hint:       sdkErr.Hint,
 			HTTPStatus: sdkErr.HTTPStatus,
 			Retryable:  sdkErr.Retryable,
 			Cause:      sdkErr,
-		}
+		})
 	}
 	return err
 }

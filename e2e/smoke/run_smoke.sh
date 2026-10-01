@@ -76,6 +76,7 @@ level0=(
   "$SMOKE_DIR"/smoke_checkins.bats
   "$SMOKE_DIR"/smoke_schedule.bats
   "$SMOKE_DIR"/smoke_config_local.bats
+  "$SMOKE_DIR"/smoke_event_feed.bats
 )
 level0_exist=()
 for f in "${level0[@]}"; do
@@ -90,6 +91,7 @@ echo ""
 echo "--- Level 1: Mutation tests (parallel, $jobs jobs) ---"
 level1=(
   "$SMOKE_DIR"/smoke_todos_write.bats
+  "$SMOKE_DIR"/smoke_subtasks.bats
   "$SMOKE_DIR"/smoke_messages_write.bats
   "$SMOKE_DIR"/smoke_files_write.bats
   "$SMOKE_DIR"/smoke_cards_write.bats

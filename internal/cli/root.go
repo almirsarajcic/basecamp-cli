@@ -333,6 +333,7 @@ func Execute() {
 	cmd.AddCommand(commands.NewCheckinsCmd())
 	cmd.AddCommand(commands.NewWebhooksCmd())
 	cmd.AddCommand(commands.NewEventsCmd())
+	cmd.AddCommand(commands.NewInboxCmd())
 	cmd.AddCommand(commands.NewSubscriptionsCmd())
 	cmd.AddCommand(commands.NewForwardsCmd())
 	cmd.AddCommand(commands.NewMessageboardsCmd())
@@ -366,6 +367,7 @@ func Execute() {
 	cmd.AddCommand(commands.NewAssignmentsCmd())
 	cmd.AddCommand(commands.NewBookmarksCmd())
 	cmd.AddCommand(commands.NewBubbleUpCmd())
+	cmd.AddCommand(commands.NewSubtasksCmd())
 	cmd.AddCommand(commands.NewDraftsCmd())
 	cmd.AddCommand(commands.NewNotesCmd())
 	cmd.AddCommand(commands.NewCalendarsCmd())
@@ -374,6 +376,7 @@ func Execute() {
 	cmd.AddCommand(commands.NewBonfireCmd())
 	cmd.AddCommand(commands.NewAgentHookCmd())
 	cmd.AddCommand(commands.NewMCPCmd())
+	cmd.AddCommand(commands.NewConnectCmd())
 
 	// Tier-2 stdin guard: reject a stray literal "-" when stdin is piped,
 	// everywhere a command doesn't explicitly accept it — except cobra's
@@ -420,6 +423,13 @@ func Execute() {
 
 		// Convert error to structured output
 		apiErr := output.AsError(err)
+
+		// An interrupted command has already told the person what stopped;
+		// an error envelope on top would dress a Ctrl-C or a SIGTERM up as
+		// a failure.
+		if apiErr.Code == output.CodeInterrupted || apiErr.Code == output.CodeTerminated {
+			os.Exit(output.ExitCodeFor(apiErr.Code))
+		}
 
 		// Commands whose stdout speaks a wire protocol (basecamp mcp:
 		// JSON-RPC) keep errors off stdout entirely — an error envelope

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Basecamp",
-    "version": "2026-09-02",
+    "version": "2026-09-15",
     "description": "Basecamp API",
     "contact": {
       "name": "Basecamp",
@@ -2829,10 +2829,262 @@
           }
         },
         "tags": [
-          "Automation"
+          "Dock"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 2,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      }
+    },
+    "/{accountId}/buckets/{bucketId}/recordings/{recordingId}/templatifications.json": {
+      "post": {
+        "description": "Templatify a to-do list or card table",
+        "operationId": "CreateTemplatification",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTemplatificationRequestContent"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "bucketId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          },
+          {
+            "name": "recordingId",
+            "in": "path",
+            "description": "The to-do list or card table to templatify. Anything else is a 403.",
+            "schema": {
+              "type": "integer",
+              "description": "The to-do list or card table to templatify. Anything else is a 403.",
+              "format": "int64"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "CreateTemplatification 201 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateTemplatificationResponseContent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError 404 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundErrorResponseContent"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "FieldValidationError 422 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FieldValidationErrorResponseContent"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RateLimitError 429 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Templates"
+        ],
+        "x-basecamp-retry": {
+          "maxAttempts": 2,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      }
+    },
+    "/{accountId}/buckets/{bucketId}/recordings/{recordingId}/templatifications/{templatificationId}": {
+      "get": {
+        "description": "Get a templatification",
+        "operationId": "GetTemplatification",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "bucketId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          },
+          {
+            "name": "recordingId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          },
+          {
+            "name": "templatificationId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "GetTemplatification 200 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetTemplatificationResponseContent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError 404 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundErrorResponseContent"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RateLimitError 429 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Templates"
+        ],
+        "x-basecamp-retry": {
+          "maxAttempts": 3,
           "baseDelayMs": 1000,
           "backoff": "exponential",
           "retryOn": [
@@ -3284,7 +3536,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Webhooks"
         ],
         "x-basecamp-pagination": {
           "style": "link",
@@ -3409,7 +3661,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Webhooks"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 2,
@@ -4665,6 +4917,9 @@
             }
           }
         },
+        "tags": [
+          "Card Tables"
+        ],
         "x-basecamp-idempotent": {
           "natural": true
         },
@@ -4676,10 +4931,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Card Tables"
-        ]
+        }
       },
       "post": {
         "description": "Subscribe to a card column (watch for changes)",
@@ -4761,6 +5013,9 @@
             }
           }
         },
+        "tags": [
+          "Card Tables"
+        ],
         "x-basecamp-idempotent": {
           "natural": true
         },
@@ -4772,10 +5027,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Card Tables"
-        ]
+        }
       }
     },
     "/{accountId}/card_tables/steps/{stepId}": {
@@ -7948,7 +8200,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Dock"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -8041,7 +8293,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Dock"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
@@ -8151,7 +8403,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Dock"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -8372,6 +8624,196 @@
         "x-basecamp-write-semantics": {
           "mode": "replace",
           "clearsOmitted": true
+        }
+      }
+    },
+    "/{accountId}/events.json": {
+      "get": {
+        "description": "Poll the account event feed for events after a position (oldest first, strict event-id order, up to 100 per page).\n\n**Entry.** With neither `since` nor `position` the feed begins at the present\n(equivalent to `since=now`). `since=<event id>` starts after that id and\n`since=0` replays all served history back to the feed's epoch; `since` is a\nsigned 64-bit integer written in decimal, or the literal `now`. `position`\nresumes from a token a previous page issued \u2014 signed, opaque, bound to the\naccount and the filter set.\n\n**Pagination**: cursor style \u2014 the body envelope, not the Link header.\n`position` is the durable cursor (persist it only after processing the\npage's events); `next` is an absolute continuation URL present only while\nthis walk has more to serve. One call answers one page; no generator emits\na walk for the cursor style \u2014 see the section note.\n\n**Errors.** 400 (FeedRequestError) for a malformed position (resume with\n`since=`) or a malformed filter (fix the filters; a position reset will not\nhelp), told apart by its optional `reason` and undifferentiated when `reason`\nis absent. 409 (FeedFilterMismatchError) when the position was minted for a\ndifferent filter set. 410 (FeedPositionGoneError) when the position predates\nthe feed's epoch; its `resume` re-enters at the epoch.",
+        "operationId": "PollEvents",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Entry point: a decimal event id (start after it; `0` replays served\nhistory back to the epoch), or the literal `now` (skip history). Mutually\nexclusive with `position` in practice; omit both to enter at the present.",
+            "schema": {
+              "type": "string",
+              "description": "Entry point: a decimal event id (start after it; `0` replays served\nhistory back to the epoch), or the literal `now` (skip history). Mutually\nexclusive with `position` in practice; omit both to enter at the present."
+            }
+          },
+          {
+            "name": "position",
+            "in": "query",
+            "description": "Resume token from a previous page's `position`. Opaque and signed; never\nconstructed or parsed client-side.",
+            "schema": {
+              "type": "string",
+              "description": "Resume token from a previous page's `position`. Opaque and signed; never\nconstructed or parsed client-side."
+            }
+          },
+          {
+            "name": "types",
+            "in": "query",
+            "description": "Comma-separated event types from the catalog (e.g. `message.created,comment.created`).",
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated event types from the catalog (e.g. `message.created,comment.created`)."
+            }
+          },
+          {
+            "name": "buckets",
+            "in": "query",
+            "description": "Comma-separated bucket (project) ids, at most 100.",
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated bucket (project) ids, at most 100."
+            }
+          },
+          {
+            "name": "creators",
+            "in": "query",
+            "description": "Comma-separated creator person ids, at most 100.",
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated creator person ids, at most 100."
+            }
+          },
+          {
+            "name": "performers",
+            "in": "query",
+            "description": "Comma-separated effective-performer ids (the agent on a delegated action,\nelse the creator), at most 100. The literal `self` means the request's own\neffective actor and is resolved server-side before filtering.",
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated effective-performer ids (the agent on a delegated action,\nelse the creator), at most 100. The literal `self` means the request's own\neffective actor and is resolved server-side before filtering."
+            }
+          },
+          {
+            "name": "exclude_performers",
+            "in": "query",
+            "description": "Comma-separated effective-performer ids to exclude, at most 100; `self`\nas on `performers`. `exclude_performers=self` is the loop guard for an\nagent that acts on what it hears.",
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated effective-performer ids to exclude, at most 100; `self`\nas on `performers`. `exclude_performers=self` is the loop guard for an\nagent that acts on what it hears."
+            }
+          },
+          {
+            "name": "actor_types",
+            "in": "query",
+            "description": "Comma-separated actor kinds: `agent`, `person`, or both. A filter, not a\ndefault \u2014 agent activity is real account activity.",
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated actor kinds: `agent`, `person`, or both. A filter, not a\ndefault \u2014 agent activity is real account activity."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PollEvents 200 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PollEventsResponseContent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "FeedRequestError 400 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedRequestErrorResponseContent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "FeedFilterMismatchError 409 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedFilterMismatchErrorResponseContent"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "FeedPositionGoneError 410 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedPositionGoneErrorResponseContent"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RateLimitError 429 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "EventFeed"
+        ],
+        "x-basecamp-pagination": {
+          "style": "cursor",
+          "key": "events",
+          "maxPageSize": 100
+        },
+        "x-basecamp-retry": {
+          "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
         }
       }
     },
@@ -8792,7 +9234,8 @@
                 "$ref": "#/components/schemas/UpdateGaugeNeedleRequestContent"
               }
             }
-          }
+          },
+          "required": true
         },
         "parameters": [
           {
@@ -9111,6 +9554,162 @@
         "x-basecamp-write-semantics": {
           "mode": "replace",
           "clearsOmitted": true
+        }
+      }
+    },
+    "/{accountId}/inbox.json": {
+      "get": {
+        "description": "Poll the authenticated agent's inbox for the items that addressed it (oldest first, strict item-id order); people receive 403.\n\nThe inbox is the low-noise \"someone addressed you\" lane as its own resource\nrather than a filter over the account feed. **Agents only for now**: any\nother principal receives 403.\n\nAn item is a first-class delivery with its own identity: one event can\naddress the same principal for several reasons, and each reason is its own\nitem. Deduplicate by `addressing_id`, never by event id. Items are never\nself-addressed, are kept for 30 days, and are dropped at read time when the\nevent is no longer readable.\n\n**Entry**: `since=0` replays the earliest retained items, `since=now` enters\nat the present, `position` resumes. Inbox positions are bound to the\naccount, the principal, and the filter set, and are never interchangeable\nwith feed positions.\n\n**Pagination**: cursor style, exactly as PollEvents \u2014 the body envelope\n(`items`, `position`, `next`), not the Link header and not the generic\npaginator. Up to 100 items per page.\n\n**Errors** follow PollEvents (FeedRequestError 400, FeedFilterMismatchError\n409), except that 403 carries no body \u2014 the agent guard's bare\n`head :forbidden` (BareForbiddenError) \u2014 and that the 410 is the inbox's own\nInboxPositionGoneError: the position fell behind the retention window, there\nis no epoch, and `resume` re-enters at `since=0`, the earliest retained item\n\u2014 not the feed's recovery, and not interchangeable with it.",
+        "operationId": "PollInbox",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Entry point: `0` (earliest retained), `now` (present), or a decimal item\nid to start after.",
+            "schema": {
+              "type": "string",
+              "description": "Entry point: `0` (earliest retained), `now` (present), or a decimal item\nid to start after."
+            }
+          },
+          {
+            "name": "position",
+            "in": "query",
+            "description": "Resume token from a previous inbox page's `position`.",
+            "schema": {
+              "type": "string",
+              "description": "Resume token from a previous inbox page's `position`."
+            }
+          },
+          {
+            "name": "reasons",
+            "in": "query",
+            "description": "Comma-separated addressing reasons: `mentioned`, `assigned`, `subscribed`,\n`watched`, `pinged`, `boosted`.",
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated addressing reasons: `mentioned`, `assigned`, `subscribed`,\n`watched`, `pinged`, `boosted`."
+            }
+          },
+          {
+            "name": "types",
+            "in": "query",
+            "description": "Comma-separated event types, as a narrowing filter.",
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated event types, as a narrowing filter."
+            }
+          },
+          {
+            "name": "buckets",
+            "in": "query",
+            "description": "Comma-separated bucket ids, as a narrowing filter (at most 100).",
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated bucket ids, as a narrowing filter (at most 100)."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PollInbox 200 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PollInboxResponseContent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "FeedRequestError 400 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedRequestErrorResponseContent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "BareForbiddenError 403 response"
+          },
+          "409": {
+            "description": "FeedFilterMismatchError 409 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedFilterMismatchErrorResponseContent"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "InboxPositionGoneError 410 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxPositionGoneErrorResponseContent"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RateLimitError 429 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "EventFeed"
+        ],
+        "x-basecamp-pagination": {
+          "style": "cursor",
+          "key": "items",
+          "maxPageSize": 100
+        },
+        "x-basecamp-retry": {
+          "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
         }
       }
     },
@@ -9701,7 +10300,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Lineup"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
@@ -9795,7 +10394,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Lineup"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 2,
@@ -9880,7 +10479,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Lineup"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -9985,7 +10584,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Lineup"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -11982,6 +12581,9 @@
             }
           }
         },
+        "tags": [
+          "Checkins"
+        ],
         "x-basecamp-pagination": {
           "style": "link",
           "maxPageSize": 50
@@ -11994,10 +12596,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Automation"
-        ]
+        }
       }
     },
     "/{accountId}/my/readings.json": {
@@ -12275,7 +12874,7 @@
     },
     "/{accountId}/my/unreads.json": {
       "put": {
-        "description": "Mark specified items as read",
+        "description": "Mark specified items as read\n\nA batch is capped at 500 readables; a larger one is refused with 422\nbefore any per-item work (bc3 `f3437f5c732`).",
         "operationId": "MarkAsRead",
         "requestBody": {
           "content": {
@@ -12320,6 +12919,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "ValidationError 422 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponseContent"
                 }
               }
             }
@@ -13326,7 +13935,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Recordings"
         ],
         "x-basecamp-pagination": {
           "style": "link",
@@ -13899,6 +14508,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError 404 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundErrorResponseContent"
                 }
               }
             }
@@ -15095,6 +15714,9 @@
             }
           }
         },
+        "tags": [
+          "Timeline"
+        ],
         "x-basecamp-pagination": {
           "style": "link",
           "totalCountHeader": "X-Total-Count",
@@ -15108,10 +15730,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Reports"
-        ]
+        }
       }
     },
     "/{accountId}/projects/{projectId}/timesheet.json": {
@@ -15322,7 +15941,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Checkins"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
@@ -15425,7 +16044,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Checkins"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -15520,7 +16139,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Checkins"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
@@ -15622,7 +16241,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Checkins"
         ],
         "x-basecamp-pagination": {
           "style": "link",
@@ -15737,7 +16356,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Checkins"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 2,
@@ -15829,7 +16448,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Checkins"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
@@ -15938,7 +16557,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Checkins"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -16043,7 +16662,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Checkins"
         ],
         "x-basecamp-pagination": {
           "style": "link",
@@ -16158,7 +16777,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Checkins"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 2,
@@ -16259,6 +16878,9 @@
             }
           }
         },
+        "tags": [
+          "Checkins"
+        ],
         "x-basecamp-pagination": {
           "style": "link",
           "maxPageSize": 50
@@ -16271,10 +16893,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Automation"
-        ]
+        }
       }
     },
     "/{accountId}/questions/{questionId}/answers/by/{personId}": {
@@ -16384,6 +17003,9 @@
             }
           }
         },
+        "tags": [
+          "Checkins"
+        ],
         "x-basecamp-pagination": {
           "style": "link",
           "maxPageSize": 50
@@ -16396,10 +17018,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Automation"
-        ]
+        }
       }
     },
     "/{accountId}/questions/{questionId}/notification_settings.json": {
@@ -16499,6 +17118,9 @@
             }
           }
         },
+        "tags": [
+          "Checkins"
+        ],
         "x-basecamp-idempotent": {
           "natural": true
         },
@@ -16510,10 +17132,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Automation"
-        ]
+        }
       }
     },
     "/{accountId}/questions/{questionId}/pause.json": {
@@ -16594,6 +17213,9 @@
             }
           }
         },
+        "tags": [
+          "Checkins"
+        ],
         "x-basecamp-idempotent": {
           "natural": true
         },
@@ -16605,10 +17227,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Automation"
-        ]
+        }
       },
       "post": {
         "description": "Pause a check-in question (stops sending reminders)",
@@ -16697,6 +17316,9 @@
             }
           }
         },
+        "tags": [
+          "Checkins"
+        ],
         "x-basecamp-idempotent": {
           "natural": true
         },
@@ -16708,10 +17330,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Automation"
-        ]
+        }
       }
     },
     "/{accountId}/recordings/{messageId}/pin.json": {
@@ -18037,7 +18656,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Recordings"
         ],
         "x-basecamp-pagination": {
           "style": "link",
@@ -18372,7 +18991,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Recordings"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -18485,7 +19104,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Recordings"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -18583,7 +19202,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Recordings"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -18601,7 +19220,7 @@
     },
     "/{accountId}/recordings/{recordingId}/status/archived.json": {
       "put": {
-        "description": "Archive a recording",
+        "description": "Archive a recording; bc3 answers 403 for types it never lets be archived, timesheet entries among them",
         "operationId": "ArchiveRecording",
         "parameters": [
           {
@@ -18681,7 +19300,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Recordings"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -18699,7 +19318,7 @@
     },
     "/{accountId}/recordings/{recordingId}/status/trashed.json": {
       "put": {
-        "description": "Trash a recording",
+        "description": "Trash a recording; bc3 answers 403 for types it never lets be trashed, timesheet entries among them (DestroyTimesheetEntry removes those, permanently)",
         "operationId": "TrashRecording",
         "parameters": [
           {
@@ -18793,7 +19412,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Recordings"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -19278,6 +19897,243 @@
         }
       }
     },
+    "/{accountId}/recordings/{recordingId}/subtasks.json": {
+      "get": {
+        "description": "List a recording's subtasks, in position order\n\nOnly to-dos and cards hold subtasks; check for `subtasks_count` and\n`subtasks_url` on the parent's JSON.\n\n**Pagination**: Uses Link header (RFC5988). Follow the `next` rel URL\nto fetch additional pages. X-Total-Count header provides total count.",
+        "operationId": "ListSubtasks",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "recordingId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number for paginating through results. Defaults to 1. A positive value selects exactly that page, not a starting offset; see SPEC section 8.",
+            "schema": {
+              "type": "integer",
+              "description": "Page number for paginating through results. Defaults to 1. A positive value selects exactly that page, not a starting offset; see SPEC section 8.",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ListSubtasks 200 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSubtasksResponseContent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError 404 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundErrorResponseContent"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RateLimitError 429 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Subtasks"
+        ],
+        "x-basecamp-pagination": {
+          "style": "link",
+          "totalCountHeader": "X-Total-Count",
+          "maxPageSize": 50
+        },
+        "x-basecamp-retry": {
+          "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      },
+      "post": {
+        "description": "Create a subtask under a to-do or a card\n\nAny other recording answers `403 Forbidden`.",
+        "operationId": "CreateSubtask",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSubtaskRequestContent"
+              }
+            }
+          },
+          "required": true
+        },
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "recordingId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "CreateSubtask 201 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateSubtaskResponseContent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError 404 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundErrorResponseContent"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "ValidationError 422 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponseContent"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RateLimitError 429 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Subtasks"
+        ],
+        "x-basecamp-retry": {
+          "maxAttempts": 2,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      }
+    },
     "/{accountId}/recordings/{recordingId}/timesheet.json": {
       "get": {
         "description": "Get timesheet for a specific recording",
@@ -19591,7 +20447,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Dock"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -19687,7 +20543,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Dock"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 2,
@@ -19790,7 +20646,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Dock"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -19992,6 +20848,9 @@
             }
           }
         },
+        "tags": [
+          "Reports"
+        ],
         "x-basecamp-pagination": {
           "style": "link",
           "totalCountHeader": "X-Total-Count",
@@ -20005,10 +20864,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Reports"
-        ]
+        }
       }
     },
     "/{accountId}/reports/schedules/upcoming.json": {
@@ -20110,6 +20966,9 @@
             }
           }
         },
+        "tags": [
+          "Reports"
+        ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
           "baseDelayMs": 1000,
@@ -20118,10 +20977,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Reports"
-        ]
+        }
       }
     },
     "/{accountId}/reports/timesheet.json": {
@@ -20298,6 +21154,9 @@
             }
           }
         },
+        "tags": [
+          "People"
+        ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
           "baseDelayMs": 1000,
@@ -20306,10 +21165,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Reports"
-        ]
+        }
       }
     },
     "/{accountId}/reports/todos/assigned/{personId}": {
@@ -20409,6 +21265,9 @@
             }
           }
         },
+        "tags": [
+          "Reports"
+        ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
           "baseDelayMs": 1000,
@@ -20417,10 +21276,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Reports"
-        ]
+        }
       }
     },
     "/{accountId}/reports/todos/overdue.json": {
@@ -20492,6 +21348,9 @@
             }
           }
         },
+        "tags": [
+          "Reports"
+        ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
           "baseDelayMs": 1000,
@@ -20500,10 +21359,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Reports"
-        ]
+        }
       }
     },
     "/{accountId}/reports/users/progress/{personId}.json": {
@@ -20604,6 +21460,9 @@
             }
           }
         },
+        "tags": [
+          "Reports"
+        ],
         "x-basecamp-pagination": {
           "style": "link",
           "totalCountHeader": "X-Total-Count",
@@ -20618,10 +21477,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Reports"
-        ]
+        }
       }
     },
     "/{accountId}/schedule_entries/{entryId}": {
@@ -21575,7 +22431,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Search"
         ],
         "x-basecamp-pagination": {
           "style": "link",
@@ -21663,7 +22519,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Search"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
@@ -22170,10 +23026,592 @@
         }
       }
     },
-    "/{accountId}/template_library.json": {
+    "/{accountId}/subtasks/{subtaskId}": {
+      "delete": {
+        "description": "Delete a subtask\n\nOn accounts where deleting is limited to admins and the creator, everyone\nelse gets `403 Forbidden`.",
+        "operationId": "DeleteSubtask",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "subtaskId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "DeleteSubtask 204 response"
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError 404 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Subtasks"
+        ],
+        "x-basecamp-idempotent": {
+          "natural": true
+        },
+        "x-basecamp-retry": {
+          "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      },
       "get": {
-        "description": "Get the account's to-do list template library",
-        "operationId": "GetTemplateLibrary",
+        "description": "Get a subtask by ID",
+        "operationId": "GetSubtask",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "subtaskId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "GetSubtask 200 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetSubtaskResponseContent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError 404 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Subtasks"
+        ],
+        "x-basecamp-retry": {
+          "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      },
+      "put": {
+        "description": "Update a subtask\n\nA partial update: every omitted parameter is left unchanged. Clearing a\nvalue takes an explicit send \u2014 `\"due_on\": null` clears the due date (an\nempty string is accepted too, and is what the Ruby, Python and TypeScript\nSDKs send, since they drop nil, None and undefined from the body);\n`\"assignee_ids\": []` removes every assignee. Send at least one parameter:\nan empty body is refused with `400 Bad Request`.",
+        "operationId": "UpdateSubtask",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSubtaskRequestContent"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "subtaskId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "UpdateSubtask 200 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateSubtaskResponseContent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError 404 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundErrorResponseContent"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "ValidationError 422 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Subtasks"
+        ],
+        "x-basecamp-idempotent": {
+          "natural": true
+        },
+        "x-basecamp-retry": {
+          "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      }
+    },
+    "/{accountId}/subtasks/{subtaskId}/completion.json": {
+      "delete": {
+        "description": "Mark a subtask as not completed",
+        "operationId": "UncompleteSubtask",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "subtaskId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "UncompleteSubtask 204 response"
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError 404 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Subtasks"
+        ],
+        "x-basecamp-idempotent": {
+          "natural": true
+        },
+        "x-basecamp-retry": {
+          "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      },
+      "post": {
+        "description": "Mark a subtask as completed",
+        "operationId": "CompleteSubtask",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "subtaskId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "CompleteSubtask 204 response"
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError 404 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundErrorResponseContent"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RateLimitError 429 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Subtasks"
+        ],
+        "x-basecamp-idempotent": {
+          "natural": true
+        },
+        "x-basecamp-retry": {
+          "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      }
+    },
+    "/{accountId}/subtasks/{subtaskId}/position.json": {
+      "put": {
+        "description": "Move a subtask to a new position among its siblings",
+        "operationId": "RepositionSubtask",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepositionSubtaskRequestContent"
+              }
+            }
+          },
+          "required": true
+        },
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          },
+          {
+            "name": "subtaskId",
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "RepositionSubtask 204 response"
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError 404 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundErrorResponseContent"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "ValidationError 422 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Subtasks"
+        ],
+        "x-basecamp-idempotent": {
+          "natural": true
+        },
+        "x-basecamp-retry": {
+          "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      }
+    },
+    "/{accountId}/template_library/card_tables.json": {
+      "get": {
+        "description": "Get the account's card table templates",
+        "operationId": "GetTemplateLibraryCardTables",
         "parameters": [
           {
             "name": "accountId",
@@ -22189,11 +23627,11 @@
         ],
         "responses": {
           "200": {
-            "description": "GetTemplateLibrary 200 response",
+            "description": "GetTemplateLibraryCardTables 200 response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GetTemplateLibraryResponseContent"
+                  "$ref": "#/components/schemas/GetTemplateLibraryCardTablesResponseContent"
                 }
               }
             }
@@ -22240,10 +23678,111 @@
           }
         },
         "tags": [
-          "Automation"
+          "Templates"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      },
+      "post": {
+        "description": "Create a card table template with the default columns",
+        "operationId": "CreateTemplateLibraryCardTable",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTemplateLibraryCardTableRequestContent"
+              }
+            }
+          },
+          "required": true
+        },
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "CreateTemplateLibraryCardTable 201 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateTemplateLibraryCardTableResponseContent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "ValidationError 422 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponseContent"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RateLimitError 429 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Templates"
+        ],
+        "x-basecamp-retry": {
+          "maxAttempts": 2,
           "baseDelayMs": 1000,
           "backoff": "exponential",
           "retryOn": [
@@ -22255,7 +23794,7 @@
     },
     "/{accountId}/template_library/copies.json": {
       "post": {
-        "description": "Start copying a to-do list template into a project",
+        "description": "Start copying a to-do list or card table template into a project",
         "operationId": "CreateTemplateLibraryCopy",
         "requestBody": {
           "content": {
@@ -22353,7 +23892,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Templates"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 2,
@@ -22455,10 +23994,194 @@
           }
         },
         "tags": [
-          "Automation"
+          "Templates"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      }
+    },
+    "/{accountId}/template_library/todolists.json": {
+      "get": {
+        "description": "Get the account's to-do list templates",
+        "operationId": "GetTemplateLibraryTodolists",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "GetTemplateLibraryTodolists 200 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetTemplateLibraryTodolistsResponseContent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RateLimitError 429 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Templates"
+        ],
+        "x-basecamp-retry": {
+          "maxAttempts": 3,
+          "baseDelayMs": 1000,
+          "backoff": "exponential",
+          "retryOn": [
+            429,
+            503
+          ]
+        }
+      },
+      "post": {
+        "description": "Create an empty to-do list template",
+        "operationId": "CreateTemplateLibraryTodolist",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTemplateLibraryTodolistRequestContent"
+              }
+            }
+          },
+          "required": true
+        },
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "Basecamp account ID (numeric string)",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Basecamp account ID (numeric string)"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "CreateTemplateLibraryTodolist 201 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateTemplateLibraryTodolistResponseContent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError 401 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorResponseContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError 403 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorResponseContent"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "ValidationError 422 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponseContent"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RateLimitError 429 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimitErrorResponseContent"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError 500 response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalServerErrorResponseContent"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Templates"
+        ],
+        "x-basecamp-retry": {
+          "maxAttempts": 2,
           "baseDelayMs": 1000,
           "backoff": "exponential",
           "retryOn": [
@@ -22557,7 +24280,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Templates"
         ],
         "x-basecamp-pagination": {
           "style": "link",
@@ -22663,7 +24386,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Templates"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 2,
@@ -22748,7 +24471,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Templates"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -22841,7 +24564,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Templates"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
@@ -22950,7 +24673,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Templates"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -23065,7 +24788,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Templates"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 2,
@@ -23166,7 +24889,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Templates"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
@@ -23181,7 +24904,7 @@
     },
     "/{accountId}/timesheet_entries/{entryId}": {
       "delete": {
-        "description": "Permanently delete a timesheet entry; answers 403 when the caller may not archive or trash it.",
+        "description": "Permanently delete a timesheet entry, which never appears in the trash and cannot be restored; this is the only way to remove one, since bc3 answers 403 to TrashRecording and ArchiveRecording for every timesheet entry, and it answers 403 when the caller may not remove the entry.",
         "operationId": "DestroyTimesheetEntry",
         "parameters": [
           {
@@ -25433,6 +27156,9 @@
             }
           }
         },
+        "tags": [
+          "Todos"
+        ],
         "x-basecamp-idempotent": {
           "natural": true
         },
@@ -25444,10 +27170,7 @@
             429,
             503
           ]
-        },
-        "tags": [
-          "Todos"
-        ]
+        }
       }
     },
     "/{accountId}/todosets/todolists/{todolistId}/position.json": {
@@ -27450,7 +29173,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Webhooks"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -27543,7 +29266,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Webhooks"
         ],
         "x-basecamp-retry": {
           "maxAttempts": 3,
@@ -27662,7 +29385,7 @@
           }
         },
         "tags": [
-          "Automation"
+          "Webhooks"
         ],
         "x-basecamp-idempotent": {
           "natural": true
@@ -28333,8 +30056,9 @@
           "steps": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/CardStep"
+              "$ref": "#/components/schemas/Subtask"
             },
+            "description": "The first 100 subtasks, embedded read-only. A card with more than 100\nreports the total in `subtasks_count`; fetch the rest from `subtasks_url`.",
             "x-go-type-skip-optional-pointer": true
           },
           "boosts_count": {
@@ -28342,6 +30066,18 @@
             "format": "int32"
           },
           "boosts_url": {
+            "type": "string"
+          },
+          "subtasks_count": {
+            "type": "integer",
+            "description": "Subtask accounting (BC3 #12659). `subtasks_count` is the real total,\n`subtasks_completed_count` how many are done, and `subtasks_url` the\npaginated listing of all of them (`ListSubtasks`).",
+            "format": "int32"
+          },
+          "subtasks_completed_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "subtasks_url": {
             "type": "string"
           }
         },
@@ -28513,111 +30249,6 @@
           "updated_at"
         ]
       },
-      "CardStep": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "status": {
-            "type": "string"
-          },
-          "visible_to_clients": {
-            "type": "boolean"
-          },
-          "created_at": {
-            "type": "string",
-            "x-go-type": "time.Time",
-            "x-go-type-import": {
-              "path": "time"
-            }
-          },
-          "updated_at": {
-            "type": "string",
-            "x-go-type": "time.Time",
-            "x-go-type-import": {
-              "path": "time"
-            }
-          },
-          "title": {
-            "type": "string"
-          },
-          "inherits_status": {
-            "type": "boolean"
-          },
-          "type": {
-            "type": "string"
-          },
-          "url": {
-            "type": "string"
-          },
-          "app_url": {
-            "type": "string"
-          },
-          "bookmark_url": {
-            "type": "string"
-          },
-          "position": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "due_on": {
-            "type": "string",
-            "x-go-type": "types.Date",
-            "x-go-type-import": {
-              "path": "github.com/basecamp/basecamp-sdk/go/pkg/types"
-            }
-          },
-          "completed": {
-            "type": "boolean"
-          },
-          "completed_at": {
-            "type": "string",
-            "x-go-type": "time.Time",
-            "x-go-type-import": {
-              "path": "time"
-            }
-          },
-          "parent": {
-            "$ref": "#/components/schemas/RecordingParent"
-          },
-          "bucket": {
-            "$ref": "#/components/schemas/TodoBucket"
-          },
-          "creator": {
-            "$ref": "#/components/schemas/Person"
-          },
-          "completer": {
-            "$ref": "#/components/schemas/Person"
-          },
-          "assignees": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Person"
-            },
-            "x-go-type-skip-optional-pointer": true
-          },
-          "completion_url": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "app_url",
-          "bucket",
-          "created_at",
-          "creator",
-          "id",
-          "inherits_status",
-          "parent",
-          "status",
-          "title",
-          "type",
-          "updated_at",
-          "url",
-          "visible_to_clients"
-        ]
-      },
       "CardTable": {
         "type": "object",
         "properties": {
@@ -28665,6 +30296,18 @@
           },
           "subscription_url": {
             "type": "string"
+          },
+          "position": {
+            "type": "integer",
+            "description": "Position on the project dock. Absent on a card table template, which the\nlibrary orders by title instead.",
+            "format": "int32"
+          },
+          "parent": {
+            "$ref": "#/components/schemas/RecordingParent"
+          },
+          "public_link_url": {
+            "type": "string",
+            "description": "Public sharing URL. Absent for callers who may not share publicly, so the\nsame card table can carry it for one person and not another."
           },
           "bucket": {
             "$ref": "#/components/schemas/TodoBucket"
@@ -29528,7 +31171,7 @@
         ]
       },
       "CreateCardStepResponseContent": {
-        "$ref": "#/components/schemas/CardStep"
+        "$ref": "#/components/schemas/Subtask"
       },
       "CreateChatbotRequestContent": {
         "type": "object",
@@ -29696,7 +31339,7 @@
           },
           "notify": {
             "type": "string",
-            "description": "Who to notify: \"everyone\", \"working_on\", \"custom\", or omit for nobody"
+            "description": "Who to notify: \"everyone\", \"default\" (the project's existing\nsubscribers), or \"custom\" (the people in `subscriptions`). Omit for\nnobody: bc3 defaults `notify` to \"custom\", which with no `subscriptions`\nnotifies no one, and any unrecognized value (`Subscribers#find_subscribers`\naccepts exactly these three) falls through to nobody as well."
           },
           "subscriptions": {
             "type": "array",
@@ -29976,15 +31619,99 @@
       "CreateScheduleEntryResponseContent": {
         "$ref": "#/components/schemas/ScheduleEntry"
       },
+      "CreateStreamTicketResponseContent": {
+        "type": "object",
+        "description": "A minted stream ticket. `url` already carries the ticket in its query\nstring; connect to it verbatim.",
+        "properties": {
+          "ticket": {
+            "type": "string",
+            "description": "The signed ticket \u2014 an opaque bearer credential, never parsed or logged.",
+            "format": "password",
+            "x-basecamp-sensitive": {
+              "category": "credential",
+              "redact": true
+            }
+          },
+          "expires_in": {
+            "type": "integer",
+            "description": "Ticket lifetime in seconds (about 120). Server-owned: expiry is arbitrated\nby the server, so mint fresh per connection rather than scheduling on it.",
+            "format": "int32"
+          },
+          "url": {
+            "type": "string",
+            "description": "The exact WebSocket URL to connect to, ticket included. Sensitive because\nit embeds the ticket.",
+            "format": "password",
+            "x-basecamp-sensitive": {
+              "category": "credential",
+              "redact": true
+            }
+          }
+        },
+        "required": [
+          "expires_in",
+          "ticket",
+          "url"
+        ]
+      },
+      "CreateSubtaskRequestContent": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "due_on": {
+            "type": "string",
+            "x-go-type": "types.Date",
+            "x-go-type-import": {
+              "path": "github.com/basecamp/basecamp-sdk/go/pkg/types"
+            }
+          },
+          "assignee_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        },
+        "required": [
+          "title"
+        ]
+      },
+      "CreateSubtaskResponseContent": {
+        "$ref": "#/components/schemas/Subtask"
+      },
+      "CreateTemplateLibraryCardTableRequestContent": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The template's name. Write-only: the response carries it as `title`."
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "CreateTemplateLibraryCardTableResponseContent": {
+        "$ref": "#/components/schemas/CardTable"
+      },
       "CreateTemplateLibraryCopyRequestContent": {
         "type": "object",
         "properties": {
           "template_recording_id": {
             "type": "integer",
+            "description": "The to-do list or card table in the library to copy.",
+            "format": "int64"
+          },
+          "destination_project_id": {
+            "type": "integer",
+            "description": "The destination project. Basecamp resolves the container from the\ntemplate's kind, so a caller naming a project needs to know nothing about\ndocks or to-do sets. Supply this or destination_parent_id; if both are\nsent, destination_parent_id wins.",
             "format": "int64"
           },
           "destination_parent_id": {
             "type": "integer",
+            "description": "The container to copy into, for a caller that already holds one: the\nproject's to-do set for a to-do list template, or its dock for a card\ntable. A caller who may not edit it gets 404, not 403.",
             "format": "int64"
           },
           "adding_people_confirmed": {
@@ -29993,12 +31720,30 @@
           }
         },
         "required": [
-          "destination_parent_id",
           "template_recording_id"
         ]
       },
       "CreateTemplateLibraryCopyResponseContent": {
         "$ref": "#/components/schemas/TemplateLibraryCopy"
+      },
+      "CreateTemplateLibraryTodolistRequestContent": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "What to call the template."
+          },
+          "description": {
+            "type": "string",
+            "description": "Rich text describing the template."
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "CreateTemplateLibraryTodolistResponseContent": {
+        "$ref": "#/components/schemas/Todolist"
       },
       "CreateTemplateRequestContent": {
         "type": "object",
@@ -30016,6 +31761,30 @@
       },
       "CreateTemplateResponseContent": {
         "$ref": "#/components/schemas/Template"
+      },
+      "CreateTemplatificationRequestContent": {
+        "type": "object",
+        "properties": {
+          "template_name": {
+            "type": "string",
+            "description": "What to call the template. Defaults to the source recording's own title."
+          },
+          "copy_comments": {
+            "type": "boolean",
+            "description": "Carry the comments across."
+          },
+          "copy_assignments": {
+            "type": "boolean",
+            "description": "Carry assignees and the people involved across, adding them to the library\nif they are not already there."
+          },
+          "move_cards_to_triage": {
+            "type": "boolean",
+            "description": "Gather the cards into Triage. Card tables only, and ignored otherwise."
+          }
+        }
+      },
+      "CreateTemplatificationResponseContent": {
+        "$ref": "#/components/schemas/Templatification"
       },
       "CreateTimesheetEntryRequestContent": {
         "type": "object",
@@ -30643,6 +32412,9 @@
           "creator": {
             "$ref": "#/components/schemas/Person"
           },
+          "performed_by": {
+            "$ref": "#/components/schemas/Person"
+          },
           "boosts_count": {
             "type": "integer",
             "format": "int32"
@@ -30830,6 +32602,135 @@
             "x-go-type-skip-optional-pointer": true
           }
         }
+      },
+      "FeedEvent": {
+        "type": "object",
+        "description": "One feed row: a thin pointer, not resource state. Refetch the referenced\nrecording through the canonical resource APIs before acting on it. The same\nshape rides the inbox (`InboxItem.event`) and, with two transport-only\nextras, the live stream.",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Feed-global event id; the poll lane serves ids in strict ascending order.",
+            "format": "int64"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Event kind (e.g. `message_created`)."
+          },
+          "action": {
+            "type": "string",
+            "description": "The action that produced the event (e.g. `created`)."
+          },
+          "event_type": {
+            "type": "string",
+            "description": "Cataloged event type (e.g. `message.created`). Only cataloged types are served."
+          },
+          "bucket_id": {
+            "type": "integer",
+            "description": "The bucket (project or circle) the recording lives in.",
+            "format": "int64"
+          },
+          "creator_id": {
+            "type": "integer",
+            "description": "The person the action is attributed to.",
+            "format": "int64"
+          },
+          "performed_by_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The agent that carried out a delegated action; `null` on the wire when the\naction was performed directly. The effective performer \u2014 used by the\n`performers`/`exclude_performers` filters \u2014 is this when present, else\n`creator_id`.",
+            "format": "int64",
+            "x-go-type": "int64"
+          },
+          "recording_id": {
+            "type": "integer",
+            "description": "The recording the event references.",
+            "format": "int64"
+          },
+          "created_at": {
+            "type": "string",
+            "x-go-type": "time.Time",
+            "x-go-type-import": {
+              "path": "time"
+            }
+          },
+          "details": {
+            "description": "Type-specific details, carried verbatim as a JSON document \u2014 present only\nfor the types that publish one, absent (not empty) for every other type.\n`boost.created` publishes `boost_id`, plus `boosted_event_id` and\n`boosted_event_type`, both `null` for a boost on the recording itself\n(`boosted_event_type` also `null` when the boosted event's kind is not\ncataloged); `card.moved` publishes `column_id` and `previous_column_id`,\nthe containing columns (going on hold within a column reports the same\ncolumn twice). Verbatim on purpose: the connector's push lane delivers\nthe same object, and a typed projection would drop explicit nulls and\nany member a newly cataloged type adds, making the two lanes disagree.\nGo carries it as `json.RawMessage`; TypeScript `unknown`; Python `Any`;\nRuby a Hash; Kotlin `JsonElement`; Rust `serde_json::Value`; Swift the\nSDK's `JSONValue` (numbers as `Double`).",
+            "x-go-type": "json.RawMessage"
+          }
+        },
+        "required": [
+          "action",
+          "bucket_id",
+          "created_at",
+          "creator_id",
+          "event_type",
+          "id",
+          "kind",
+          "recording_id"
+        ]
+      },
+      "FeedFilterMismatchErrorResponseContent": {
+        "type": "object",
+        "description": "409 from the event feed's poll lanes (PollEvents, PollInbox): the held\n`position` was minted for a different filter set than the request presented.\nPositions are bound to their filter set; re-enter with `since=<id>` or\n`since=now` to acknowledge the filter change. Both digests are the bare\n16-lowercase-hex `srv2` filter digest BC3 publishes in\ndoc/api/sections/event_feed.md (\"Filter digests\").",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "position_digest": {
+            "type": "string",
+            "description": "The digest of the filter set the position was minted for."
+          },
+          "filters_digest": {
+            "type": "string",
+            "description": "The digest of the filter set this request presented."
+          }
+        },
+        "required": [
+          "error",
+          "filters_digest",
+          "position_digest"
+        ]
+      },
+      "FeedPositionGoneErrorResponseContent": {
+        "type": "object",
+        "description": "410 from PollEvents: the held `position` predates the feed's epoch \u2014 an\noperational fence that can be raised. `epoch_after_id` names the epoch and\n`resume` is an absolute URL that re-enters the feed AT THE EPOCH\n(`since=<epoch_after_id>`) with the request's canonical filters preserved,\nso the servable history above the fence is not skipped. Not interchangeable\nwith the inbox's InboxPositionGoneError, whose recovery re-enters at\n`since=0`. Consumers validate the URL (same origin as the API base, no scheme\ndowngrade) before following it \u2014 SPEC.md \u00a723 \"Continuation and Resume URL\nValidation\".",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "epoch_after_id": {
+            "type": "integer",
+            "description": "The feed's epoch: the event id after which history is servable.",
+            "format": "int64"
+          },
+          "resume": {
+            "type": "string",
+            "description": "Absolute re-entry URL for the feed, at the epoch, filters preserved."
+          }
+        },
+        "required": [
+          "epoch_after_id",
+          "error",
+          "resume"
+        ]
+      },
+      "FeedRequestErrorResponseContent": {
+        "type": "object",
+        "description": "400 from the event feed's poll lanes (PollEvents, PollInbox). Two distinct\ncases share the status: a malformed `position` (recover by re-entering with\n`since=`) and a malformed filter (fix the filters; a position reset will not\nhelp). `reason` tells them apart \u2014 `invalid_position` or `invalid_filter`\n(bc3 #13362) \u2014 and is OPTIONAL: a server that has not shipped it answers the\nflat `{error}` body, and a consumer that finds `reason` absent must treat the\n400 as undifferentiated and surface it rather than guess between recovering\nand stopping.",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "`invalid_position` (re-enter with `since=`) or `invalid_filter` (fix the\nfilters). Absent from servers that predate bc3 #13362: then the 400 is\nundifferentiated."
+          }
+        },
+        "required": [
+          "error"
+        ]
       },
       "FieldErrorMap": {
         "type": "object",
@@ -31325,7 +33226,9 @@
           },
           "previous_needle_position": {
             "type": "integer",
-            "format": "int32"
+            "description": "Emitted alongside the other needle keys (so optional, like them), and\nJSON `null` for a gauge whose only needle is its first \u2014 there is no\nprevious position yet. The enhance pass layers `nullable: true` onto the\nOpenAPI so the static SDKs type the value as nullable rather than\nflattening the first needle's null into a real 0.",
+            "format": "int32",
+            "nullable": true
           }
         },
         "required": [
@@ -31420,9 +33323,15 @@
           "position": {
             "type": "integer",
             "format": "int32"
+          },
+          "comment_count": {
+            "type": "integer",
+            "description": "Comment count of the needle: the singular branch-partial key that\ngauges/needles/_needle.json.jbuilder emits unconditionally, distinct from\nthe envelope's plural `comments_count`, which a needle also carries. The\nsame pair SearchResult models.",
+            "format": "int32"
           }
         },
         "required": [
+          "comment_count",
           "created_at",
           "description_attachments",
           "id",
@@ -31455,9 +33364,12 @@
         "properties": {
           "description": {
             "type": "string",
-            "description": "Rich text (HTML) description"
+            "description": "Rich text (HTML) description. Required: it is the only member bc3's\nupdate accepts (`needle_params.except(:color, :position)`), and\n`params.require(:gauge_needle)` rejects an empty wrapper as missing, so a\npayload without it is the same 400 as no wrapper at all."
           }
-        }
+        },
+        "required": [
+          "description"
+        ]
       },
       "GaugeTogglePayload": {
         "type": "object",
@@ -31528,7 +33440,7 @@
         "$ref": "#/components/schemas/Card"
       },
       "GetCardStepResponseContent": {
-        "$ref": "#/components/schemas/CardStep"
+        "$ref": "#/components/schemas/Subtask"
       },
       "GetCardTableResponseContent": {
         "$ref": "#/components/schemas/CardTable"
@@ -31891,14 +33803,23 @@
       "GetSubscriptionResponseContent": {
         "$ref": "#/components/schemas/Subscription"
       },
+      "GetSubtaskResponseContent": {
+        "$ref": "#/components/schemas/Subtask"
+      },
+      "GetTemplateLibraryCardTablesResponseContent": {
+        "$ref": "#/components/schemas/TemplateLibraryCardTables"
+      },
       "GetTemplateLibraryCopyResponseContent": {
         "$ref": "#/components/schemas/TemplateLibraryCopy"
       },
-      "GetTemplateLibraryResponseContent": {
-        "$ref": "#/components/schemas/TemplateLibrary"
+      "GetTemplateLibraryTodolistsResponseContent": {
+        "$ref": "#/components/schemas/TemplateLibraryTodolists"
       },
       "GetTemplateResponseContent": {
         "$ref": "#/components/schemas/Template"
+      },
+      "GetTemplatificationResponseContent": {
+        "$ref": "#/components/schemas/Templatification"
       },
       "GetTimesheetEntryResponseContent": {
         "$ref": "#/components/schemas/TimesheetEntry"
@@ -32213,6 +34134,53 @@
           "visible_to_clients"
         ]
       },
+      "InboxItem": {
+        "type": "object",
+        "description": "One addressed delivery. `addressing_id` is the item's own identity \u2014 the\ndedupe key \u2014 since one event can address the same principal for several\nreasons.",
+        "properties": {
+          "addressing_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the principal was addressed: `mentioned`, `assigned`, `subscribed`,\n`watched`, `pinged`, or `boosted`."
+          },
+          "addressed_at": {
+            "type": "string",
+            "x-go-type": "time.Time",
+            "x-go-type-import": {
+              "path": "time"
+            }
+          },
+          "event": {
+            "$ref": "#/components/schemas/FeedEvent"
+          }
+        },
+        "required": [
+          "addressed_at",
+          "addressing_id",
+          "event",
+          "reason"
+        ]
+      },
+      "InboxPositionGoneErrorResponseContent": {
+        "type": "object",
+        "description": "410 from PollInbox: the held `position` fell behind the inbox's 30-day\nretention window. There is no epoch; `resume` is an absolute URL that\nre-enters the inbox at `since=0`, the earliest retained item \u2014 exactly-once\ncontinuation, since a stale position has seen none of the retained backlog.\nA distinct shape from the feed's FeedPositionGoneError on purpose: the two\nrecoveries are not interchangeable, and a consumer must not handle one lane's\n410 with the other's arm. Validate the URL before following it, as for the\nfeed.",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "resume": {
+            "type": "string",
+            "description": "Absolute re-entry URL for the inbox, at `since=0`, filters preserved."
+          }
+        },
+        "required": [
+          "error",
+          "resume"
+        ]
+      },
       "InternalServerErrorResponseContent": {
         "type": "object",
         "properties": {
@@ -32467,6 +34435,12 @@
           "$ref": "#/components/schemas/ScheduleEntry"
         }
       },
+      "ListSubtasksResponseContent": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/Subtask"
+        }
+      },
       "ListTemplatesResponseContent": {
         "type": "array",
         "items": {
@@ -32523,7 +34497,8 @@
             "items": {
               "type": "string"
             },
-            "description": "Array of readable_sgid values identifying the items to mark as read"
+            "maxItems": 500,
+            "description": "Array of readable_sgid values identifying the items to mark as read.\nAt most 500 per request."
           }
         },
         "required": [
@@ -33245,48 +35220,68 @@
             }
           },
           "email_address": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "password",
             "x-basecamp-sensitive": {
               "category": "pii",
               "redact": true
-            }
+            },
+            "x-go-type": "string"
           },
           "personable_type": {
             "type": "string"
           },
           "title": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "password",
             "x-basecamp-sensitive": {
               "category": "pii",
               "redact": false
-            }
+            },
+            "x-go-type": "string"
           },
           "bio": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "password",
             "x-basecamp-sensitive": {
               "category": "pii",
               "redact": false
-            }
+            },
+            "x-go-type": "string"
           },
           "tagline": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Alias of `bio` introduced in BC5. BC3 emits both keys with identical content;\nolder BC4 responses may omit `tagline`. Prefer `bio` for cross-version reads.",
             "format": "password",
             "x-basecamp-sensitive": {
               "category": "pii",
               "redact": false
-            }
+            },
+            "x-go-type": "string"
           },
           "location": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "password",
             "x-basecamp-sensitive": {
               "category": "pii",
               "redact": false
-            }
+            },
+            "x-go-type": "string"
           },
           "created_at": {
             "type": "string",
@@ -33364,6 +35359,55 @@
         "required": [
           "id",
           "name"
+        ]
+      },
+      "PollEventsResponseContent": {
+        "type": "object",
+        "description": "The poll envelope. Every 200 carries `events` and `position`; `next` only\nwhile the walk continues.",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeedEvent"
+            },
+            "description": "Up to 100 events, oldest first, strict event-id order. A page may be empty\nwhile the walk crosses history the filters exclude \u2014 keep following `next`."
+          },
+          "position": {
+            "type": "string",
+            "description": "Durable position token for resuming later. Persist only after the page's\nevents have been processed."
+          },
+          "next": {
+            "type": "string",
+            "description": "Absolute continuation URL, present only while the current walk has more\nto serve; absent means the walk reached its (frozen) head \u2014 poll again\nlater from `position`."
+          }
+        },
+        "required": [
+          "events",
+          "position"
+        ]
+      },
+      "PollInboxResponseContent": {
+        "type": "object",
+        "description": "The inbox envelope: `items` and `position` on every 200, `next` while the\nwalk continues.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InboxItem"
+            }
+          },
+          "position": {
+            "type": "string",
+            "description": "Durable inbox position. Persist only after the page's items have been\nprocessed."
+          },
+          "next": {
+            "type": "string",
+            "description": "Absolute continuation URL, present only while the walk has more to serve."
+          }
+        },
+        "required": [
+          "items",
+          "position"
         ]
       },
       "Preferences": {
@@ -34105,6 +36149,18 @@
           "boosts_url": {
             "type": "string"
           },
+          "subtasks_count": {
+            "type": "integer",
+            "description": "Subtask count/URL. Carried on subtaskable recordings \u2014 to-dos and cards,\nwhose type-specific partials render with `subtaskable: true` (BC3\n#12659). Optional (absent on every other recording type and on the\nbase/webhook partial).",
+            "format": "int32"
+          },
+          "subtasks_completed_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "subtasks_url": {
+            "type": "string"
+          },
           "subject": {
             "type": "string",
             "description": "Message subject. Present on `Message` recordings \u2014 notably the account-wide\n`/messages.json` aggregate feed, whose message partial renders `subject`."
@@ -34379,13 +36435,26 @@
           },
           "position": {
             "type": "integer",
-            "description": "0-indexed position",
+            "description": "The 1-based position to move it to (1 = top), the same `reposition_to`\na to-do uses. bc3's doc said \"Zero indexed\" until BC3 #12659 corrected\nit; the server never was.",
             "format": "int32"
           }
         },
         "required": [
           "position",
           "source_id"
+        ]
+      },
+      "RepositionSubtaskRequestContent": {
+        "type": "object",
+        "properties": {
+          "position": {
+            "type": "integer",
+            "description": "The 1-based position to move it to",
+            "format": "int32"
+          }
+        },
+        "required": [
+          "position"
         ]
       },
       "RepositionTodoRequestContent": {
@@ -35167,7 +37236,7 @@
         ]
       },
       "SetCardStepCompletionResponseContent": {
-        "$ref": "#/components/schemas/CardStep"
+        "$ref": "#/components/schemas/Subtask"
       },
       "SetClientVisibilityRequestContent": {
         "type": "object",
@@ -35231,6 +37300,111 @@
           "url"
         ]
       },
+      "Subtask": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "type": "string"
+          },
+          "visible_to_clients": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "x-go-type": "time.Time",
+            "x-go-type-import": {
+              "path": "time"
+            }
+          },
+          "updated_at": {
+            "type": "string",
+            "x-go-type": "time.Time",
+            "x-go-type-import": {
+              "path": "time"
+            }
+          },
+          "title": {
+            "type": "string"
+          },
+          "inherits_status": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "app_url": {
+            "type": "string"
+          },
+          "bookmark_url": {
+            "type": "string"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "due_on": {
+            "type": "string",
+            "x-go-type": "types.Date",
+            "x-go-type-import": {
+              "path": "github.com/basecamp/basecamp-sdk/go/pkg/types"
+            }
+          },
+          "completed": {
+            "type": "boolean"
+          },
+          "completed_at": {
+            "type": "string",
+            "x-go-type": "time.Time",
+            "x-go-type-import": {
+              "path": "time"
+            }
+          },
+          "parent": {
+            "$ref": "#/components/schemas/RecordingParent"
+          },
+          "bucket": {
+            "$ref": "#/components/schemas/TodoBucket"
+          },
+          "creator": {
+            "$ref": "#/components/schemas/Person"
+          },
+          "completer": {
+            "$ref": "#/components/schemas/Person"
+          },
+          "assignees": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Person"
+            },
+            "x-go-type-skip-optional-pointer": true
+          },
+          "completion_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_url",
+          "bucket",
+          "created_at",
+          "creator",
+          "id",
+          "inherits_status",
+          "parent",
+          "status",
+          "title",
+          "type",
+          "updated_at",
+          "url",
+          "visible_to_clients"
+        ]
+      },
       "Template": {
         "type": "object",
         "properties": {
@@ -35282,26 +37456,35 @@
           "updated_at"
         ]
       },
-      "TemplateLibrary": {
+      "TemplateLibraryCardTables": {
         "type": "object",
         "properties": {
           "bucket": {
             "$ref": "#/components/schemas/RecordingBucket"
           },
-          "todoset": {
-            "$ref": "#/components/schemas/RecordingParent"
+          "kanban_boardset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordingParent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-go-type": "RecordingParent"
           },
-          "todolists": {
+          "card_tables": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Todolist"
-            }
+              "$ref": "#/components/schemas/Recording"
+            },
+            "description": "Active templates in title order, as recording projections: read one through\nGetCardTable to see its columns."
           }
         },
         "required": [
           "bucket",
-          "todolists",
-          "todoset"
+          "card_tables",
+          "kanban_boardset"
         ]
       },
       "TemplateLibraryConfirmationPerson": {
@@ -35358,10 +37541,68 @@
           },
           "destination_todolist": {
             "$ref": "#/components/schemas/Todolist"
+          },
+          "destination_card_table": {
+            "$ref": "#/components/schemas/CardTable"
           }
         },
         "required": [
           "destination_parent_id",
+          "id",
+          "source_recording_id",
+          "status",
+          "url"
+        ]
+      },
+      "TemplateLibraryTodolists": {
+        "type": "object",
+        "properties": {
+          "bucket": {
+            "$ref": "#/components/schemas/RecordingBucket"
+          },
+          "todoset": {
+            "$ref": "#/components/schemas/RecordingParent"
+          },
+          "todolists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Todolist"
+            }
+          }
+        },
+        "required": [
+          "bucket",
+          "todolists",
+          "todoset"
+        ]
+      },
+      "Templatification": {
+        "type": "object",
+        "description": "The record of templatifying a recording into the library. Carries no\ndestination parent, unlike a copy: the destination is always the library.",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "type": "string",
+            "description": "pending|processing|completed|failed"
+          },
+          "source_recording_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "url": {
+            "type": "string"
+          },
+          "destination_todolist": {
+            "$ref": "#/components/schemas/Todolist"
+          },
+          "destination_card_table": {
+            "$ref": "#/components/schemas/CardTable"
+          }
+        },
+        "required": [
           "id",
           "source_recording_id",
           "status",
@@ -35858,12 +38099,24 @@
           "boosts_url": {
             "type": "string"
           },
+          "subtasks_count": {
+            "type": "integer",
+            "description": "Subtask accounting (BC3 #12659). `subtasks_count` is the real total,\n`subtasks_completed_count` how many are done, and `subtasks_url` the\npaginated listing of all of them (`ListSubtasks`).",
+            "format": "int32"
+          },
+          "subtasks_completed_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "subtasks_url": {
+            "type": "string"
+          },
           "steps": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/CardStep"
+              "$ref": "#/components/schemas/Subtask"
             },
-            "description": "Steps embedded in the Todo response (BC5 addition). The shared\n`steps/step` jbuilder partial emits the same shape as `CardStep`,\nso the existing `CardStepList` is reused.",
+            "description": "The first 100 subtasks, embedded read-only (BC5 addition). The shared\n`subtasks/subtask` jbuilder partial emits the same `Subtask` shape a card\nembeds. A to-do with more than 100 reports the total in\n`subtasks_count`; fetch the rest from `subtasks_url`.",
             "x-go-type-skip-optional-pointer": true
           }
         },
@@ -36673,7 +38926,7 @@
         }
       },
       "UpdateCardStepResponseContent": {
-        "$ref": "#/components/schemas/CardStep"
+        "$ref": "#/components/schemas/Subtask"
       },
       "UpdateChatbotRequestContent": {
         "type": "object",
@@ -36759,7 +39012,10 @@
           "gauge_needle": {
             "$ref": "#/components/schemas/GaugeNeedleUpdatePayload"
           }
-        }
+        },
+        "required": [
+          "gauge_needle"
+        ]
       },
       "UpdateGaugeNeedleResponseContent": {
         "$ref": "#/components/schemas/GaugeNeedle"
@@ -37090,6 +39346,31 @@
       },
       "UpdateSubscriptionResponseContent": {
         "$ref": "#/components/schemas/Subscription"
+      },
+      "UpdateSubtaskRequestContent": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "due_on": {
+            "type": "string",
+            "x-go-type": "types.Date",
+            "x-go-type-import": {
+              "path": "github.com/basecamp/basecamp-sdk/go/pkg/types"
+            }
+          },
+          "assignee_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        }
+      },
+      "UpdateSubtaskResponseContent": {
+        "$ref": "#/components/schemas/Subtask"
       },
       "UpdateTemplateRequestContent": {
         "type": "object",
@@ -37701,6 +39982,9 @@
           "creator": {
             "$ref": "#/components/schemas/Person"
           },
+          "performed_by": {
+            "$ref": "#/components/schemas/Person"
+          },
           "copy": {
             "$ref": "#/components/schemas/WebhookCopy"
           }
@@ -37823,6 +40107,12 @@
           "url",
           "visible_to_clients"
         ]
+      },
+      "CardStep": {
+        "$ref": "#/components/schemas/Subtask",
+        "deprecated": true,
+        "description": "Deprecated: renamed to Subtask, the same Kanban::Step record.",
+        "x-deprecated-reason": "renamed to Subtask, the same Kanban::Step record."
       }
     }
   }

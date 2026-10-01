@@ -40,6 +40,30 @@ const (
 	ExitLimit      = 10 // Account limit reached (507)
 )
 
+// CodeInterrupted marks a command the person stopped with Ctrl-C after it
+// had started waiting on them (a login waiting for approval);
+// CodeTerminated the same stop by a SIGTERM from whatever supervises the
+// process. The command has already said what happened on its own terms, so
+// the root renders nothing more and exits with the shell's conventional
+// status for a process the signal ended.
+const (
+	CodeInterrupted = "interrupted"
+	ExitInterrupted = 130
+	CodeTerminated  = "terminated"
+	ExitTerminated  = 143
+)
+
+// CodeBusy marks work another process is doing right now — a profile's
+// credential or connector policy locked by another command — and
+// CodeLockUnavailable a host that cannot lock at all, so a command whose
+// guarantee is the lock refuses to run. Both are the caller's cue to try
+// again (the first shortly, the second after fixing the host), which is
+// what the rate-limit status says in this table.
+const (
+	CodeBusy            = "busy"
+	CodeLockUnavailable = "lock_unavailable"
+)
+
 // ExitCodeFor returns the exit code for a given error code.
 func ExitCodeFor(code string) int {
 	switch code {
@@ -47,6 +71,12 @@ func ExitCodeFor(code string) int {
 		return ExitValidation
 	case CodeLimitExceeded:
 		return ExitLimit
+	case CodeInterrupted:
+		return ExitInterrupted
+	case CodeTerminated:
+		return ExitTerminated
+	case CodeBusy, CodeLockUnavailable:
+		return ExitRateLimit
 	}
 	return clioutput.ExitCodeFor(code)
 }

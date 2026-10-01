@@ -523,7 +523,7 @@ func (r *Renderer) renderTable(b *strings.Builder, data []map[string]any) {
 		return
 	}
 
-	// Detect columns from first row
+	// Detect columns across all rows
 	columns := r.detectColumns(data)
 	if len(columns) == 0 {
 		return
@@ -576,7 +576,7 @@ func (r *Renderer) detectColumns(data []map[string]any) []column {
 		return nil
 	}
 
-	first := data[0]
+	first := firstValues(data)
 	var cols []column
 
 	for key, val := range first {
@@ -612,10 +612,28 @@ func (r *Renderer) detectColumns(data []map[string]any) []column {
 
 	// Sort by priority
 	sort.Slice(cols, func(i, j int) bool {
-		return cols[i].priority < cols[j].priority
+		if cols[i].priority != cols[j].priority {
+			return cols[i].priority < cols[j].priority
+		}
+		return cols[i].key < cols[j].key
 	})
 
 	return cols
+}
+
+// firstValues maps every key in any row to its first non-nil value. Rows may
+// carry a field only when it applies (a profile's "default" flag), so the
+// first row alone is not the schema.
+func firstValues(data []map[string]any) map[string]any {
+	vals := map[string]any{}
+	for _, row := range data {
+		for key, val := range row {
+			if vals[key] == nil {
+				vals[key] = val
+			}
+		}
+	}
+	return vals
 }
 
 func (r *Renderer) selectColumns(cols []column, data []map[string]any) []column {
@@ -1361,7 +1379,7 @@ func (r *MarkdownRenderer) detectColumns(data []map[string]any) []column {
 		return nil
 	}
 
-	first := data[0]
+	first := firstValues(data)
 	var cols []column
 
 	for key, val := range first {
@@ -1391,7 +1409,10 @@ func (r *MarkdownRenderer) detectColumns(data []map[string]any) []column {
 	}
 
 	sort.Slice(cols, func(i, j int) bool {
-		return cols[i].priority < cols[j].priority
+		if cols[i].priority != cols[j].priority {
+			return cols[i].priority < cols[j].priority
+		}
+		return cols[i].key < cols[j].key
 	})
 
 	return cols

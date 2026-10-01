@@ -6,12 +6,15 @@ Coverage of Basecamp 3 API endpoints. Source: [bc3-api/sections](https://github.
 
 | Status | Sections | Endpoints |
 |--------|----------|-----------|
-| ✅ Implemented | 50 | 192 |
+| ✅ Implemented | 52 | 203 |
 | ⚠️ Blocked | 0 | 0 |
 | ⏭️ Out of scope | 4 | 12 |
-| **Total tracked** | **54** | **204** |
+| **Total tracked** | **56** | **215** |
 
-**192 of 192 tracked in-scope endpoints.** The client-admission endpoints
+**203 of 203 tracked in-scope endpoints.** The eight subtask endpoints bc3
+#12659 documented — the flat `/recordings/:id/subtasks.json` and
+`/subtasks/:id` routes, modelled by basecamp/basecamp-sdk#883 — land as
+`subtasks`. The client-admission endpoints
 basecamp/bc3#13098 added — `PUT /projects/:id/people/client_users.json` and
 `POST`/`DELETE /projects/:id/client_enablement.json` — land as `people clients`.
 SDK v0.16.0 adds the three to-do
@@ -48,9 +51,11 @@ Out-of-scope sections are excluded from parity totals and scripts: chatbots (dif
 
 > Note: the per-row `Endpoints` column in the Coverage by Section table sums higher than the Summary totals above. The discrepancy predates the BC5 baseline; the row count (48 sections) is authoritative for the `Since` column. Reconciling endpoint counts is pre-existing maintenance, tracked separately.
 
-**SDK version:** v0.16.0 (adds the to-do list template library and asynchronous
-copy operations; `internal/version/sdk-provenance.json` is authoritative). The
-command surface below largely dates to the v0.12.0 bump, which added 20 exported
+**SDK version:** the pin in `go.mod`, with
+`internal/version/sdk-provenance.json` authoritative for the exact commit. That
+pin is basecamp-sdk v0.21.0, which ships the Subtasks service
+(basecamp/basecamp-sdk#883). v0.19.0 shipped the event-feed operations.
+The command surface below largely dates to the v0.12.0 bump, which added 20 exported
 Go methods over 13 new backend operations; the extra seven wrapped endpoints
 that already existed but were reachable only through the raw generated client,
 which the andon-cord rule forbids the CLI from calling. v0.13.0–v0.15.0
@@ -186,7 +191,8 @@ cannot faithfully cover at least one endpoint for a reason outside the CLI. A
 |---------|-----------|-------------|--------|-------|----------|-------|
 | **Core** |
 | projects | 9 | `projects` | ✅ | BC4 | - | list, show, create, update, delete |
-| todos | 12 | `todos`, `todo`, `done`, `reopen` | ✅ | BC4 | - | list, show, create, update, complete, uncomplete, position (BC5: `steps` shown on `todos show`; edit via `cards step`). `todos create --loose` creates on the to-do set, outside any list |
+| todos | 12 | `todos`, `todo`, `done`, `reopen` | ✅ | BC4 | - | list, show, create, update, complete, uncomplete, position (BC5: `steps` shown on `todos show`, plus `subtasks_count`/`subtasks_completed_count`/`subtasks_url`; edit via `subtasks`). `todos create --loose` creates on the to-do set, outside any list |
+| subtasks | 8 | `subtasks` | ✅ | BC5 | - | list (`GET /recordings/:id/subtasks.json`, paginated), show, create (`POST` on the same list route), update (partial; `--no-due`/`--no-assignees` clear), complete/uncomplete (`POST`/`DELETE /subtasks/:id/completion.json`), move (`PUT /subtasks/:id/position.json`, 1-based), delete. Account-scoped flat routes (bc3#12659), so no `--in`. Parents are to-dos and cards only. Same `Kanban::Step` records as `card_table_steps` |
 | todolists | 9 | `todolists` | ✅ | BC4 | - | list, show, create, update, position |
 | todosets | 3 | `todosets` | ✅ | BC4 | - | Container for todolists, accessed via project dock (BC5: `todos_count`, `completed_loose_todos_count`, `todos_url`, `app_todos_url`) |
 | todolist_groups | 8 | `todolistgroups` | ✅ | BC4 | - | list, show, create, update, position |
@@ -207,7 +213,7 @@ cannot faithfully cover at least one endpoint for a reason outside the CLI. A
 | card_tables | 3 | `cards` | ✅ | BC4 | - | Accessed via project dock |
 | card_table_cards | 9 | `cards` | ✅ | BC4 | - | list, show, create, update, move |
 | card_table_columns | 11 | `cards columns` | ✅ | BC4 | - | list columns. SDK v0.12.0 added `Subscribe`/`Unsubscribe`; `cards column watch\|unwatch` already performs the same action through the generic recording-subscription endpoint and returns the resulting subscription details the specific endpoint does not, so the CLI keeps one spelling |
-| card_table_steps | 4 | `cards steps` | ✅ | BC4 | - | Workflow steps on cards |
+| card_table_steps | 4 | `cards steps` | ✅ | BC4 | - | Workflow steps on cards. The card-scoped aliases of `subtasks`, which bc3 keeps serving; `cards step move --position` is 1-based (the SDK refuses 0 since basecamp/basecamp-sdk#883) |
 | card_table_wormholes | 3 | `cards wormholes` | ✅ | BC5 | - | list (via `wormholes[]` on card table), create, update, delete; `cards move --to-wormhole` teleports a card across projects (async, new id) |
 | **Personal (My)** |
 | my_bookmarks | 4 | `bookmarks` | ✅ | BC5 | - | list, check, add, remove. Private to the authenticated user; `add`/`remove` are idempotent, and `check` returns a bool reported in the payload rather than through the exit code. Bounded like the account-wide listings |
@@ -229,6 +235,8 @@ cannot faithfully cover at least one endpoint for a reason outside the CLI. A
 | schedules | 2 | `schedule` | ✅ | BC4 | - | Schedule container + settings |
 | schedule_entries | 5 | `schedule` | ✅ | BC4 | - | list, show, create, update, occurrences. Create supports `--subscribe`/`--no-subscribe` |
 | events | 1 | `events` | ✅ | BC4 | - | Recording change audit trail |
+| **Event Feed** |
+| event_feed | 3 | `events poll`, `events ticket`, `inbox` | ✅ | BC5 | - | The account-wide event feed: `GET /events.json` (`events poll`), `GET /inbox.json` (`inbox`, agent principals only), `POST /events/stream_ticket.json` (`events ticket`). Pagination is the body envelope — a durable `position` and a `next` continuation URL — not the Link-header page walk, so `--all` walks `next` rather than page numbers. The live WebSocket lane the ticket opens is out of scope for the CLI: the SDK's cable client carries a WebSocket dependency the CLI does not take. The mint is a CLI command only — it is excluded from the MCP surface, whose dispatcher would return the bearer verbatim into a model transcript and which could not open the socket anyway |
 | **Webhooks** |
 | webhooks | 7 | `webhooks` | ✅ | BC4 | - | list, show, create, update, delete |
 | **Templates** |

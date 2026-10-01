@@ -22,11 +22,28 @@ import (
 // CLI's *basecamp.AccountClient satisfies it; the client carries auth, token
 // refresh, retry, account scoping, and base URL resolution, so the
 // dispatcher only assembles paths and bodies.
+//
+// The four verbs serve every model operation but the feed's two poll lanes.
+// The recordings and comments services serve the composite actions (see
+// composite.go), which are SDK compositions rather than single requests and so
+// cannot be assembled from a method and a path. The event feed service serves
+// poll_events and poll_inbox, whose refusals carry the data a consumer resumes
+// from and whose bodies the verbs above throw away (see feed.go).
+//
+// Every one of them is required rather than probed for. The catalog derives
+// from the model and always carries these actions, so a client that satisfied
+// only the verbs would advertise actions it then failed as internal errors —
+// a promise nothing keeps. Required here, that mismatch cannot exist, and the
+// compiler is what says so.
 type API interface {
 	Get(ctx context.Context, path string) (*basecamp.Response, error)
 	Post(ctx context.Context, path string, body any) (*basecamp.Response, error)
 	Put(ctx context.Context, path string, body any) (*basecamp.Response, error)
 	Delete(ctx context.Context, path string) (*basecamp.Response, error)
+
+	Recordings() *basecamp.RecordingsService
+	Comments() *basecamp.CommentsService
+	EventFeed() *basecamp.EventFeedService
 }
 
 // The CLI hands its account-scoped client straight to New.
@@ -50,6 +67,24 @@ func (d dispatcher) handle(ctx context.Context, dom gateway.Domain, op gateway.O
 	full, ok := domain.Operation(op.Action)
 	if !ok {
 		return gateway.ErrorResult("internal error: action %q not in domain %q", op.Action, dom.Name()), nil
+	}
+
+	// Composite actions are SDK compositions, not model operations: they
+	// have no method and no path to assemble, so they are served before
+	// buildRequest ever looks for one.
+	if composite, ok := compositeHandlers[dom.Name()+"."+op.Action]; ok {
+		return composite(ctx, d.api, full, params)
+	}
+	// A model operation may still carry a composite parameter, consumed
+	// here rather than sent: mentions on messages.create_comment.
+	if err := expandMentions(ctx, d.api, dom.Name(), op.Action, params); err != nil {
+		return gateway.ErrorResult("%v", err), nil
+	}
+
+	if isFeedOperation(full.ID) {
+		// The feed's refusals carry the data a consumer resumes from, which
+		// the raw path throws away; see feed.go.
+		return d.dispatchFeed(ctx, full, params), nil
 	}
 
 	path, body, err := buildRequest(full, params)

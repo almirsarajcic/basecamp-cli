@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1504,8 +1503,7 @@ You can pass either an item ID or a Basecamp URL:
 
 				// If all probes failed, check if first error was 404 or something else
 				if result == nil && firstErr != nil {
-					sdkErr := basecamp.AsError(firstErr)
-					if sdkErr.Code != basecamp.CodeNotFound {
+					if sdkErr := basecamp.AsError(firstErr); sdkErr == nil || sdkErr.Code != basecamp.CodeNotFound {
 						// Return actual error (auth, permission, network, etc.)
 						return convertSDKError(firstErr)
 					}
@@ -1676,7 +1674,7 @@ You can pass either an upload ID or a Basecamp URL:
 			// its project scope, and an explicit --project carries over —
 			// unlike versions, both follow-up commands resolve a project
 			// before fetching, so a bare ID could prompt or fail headless.
-			ref := shellQuote(args[0])
+			ref := richtext.ShellQuote(args[0])
 			scope := breadcrumbScope(scopeProject(app, *project))
 
 			respOpts := []output.ResponseOption{
@@ -1872,7 +1870,7 @@ You can pass either an upload ID or a Basecamp URL:
 			// Breadcrumbs reuse the caller's own reference and carry an
 			// explicit --project: download resolves a project before fetching,
 			// so a bare ID without the scope could prompt or fail headless.
-			ref := shellQuote(args[0])
+			ref := richtext.ShellQuote(args[0])
 			scope := breadcrumbScope(scopeProject(app, *project))
 
 			return app.OK(upload,
@@ -1901,23 +1899,10 @@ You can pass either an upload ID or a Basecamp URL:
 	return cmd
 }
 
-// shellSafeRe matches strings that need no quoting in an emitted shell
-// command: IDs, plain Basecamp URLs, and simple names. Everything else gets
-// single-quoted.
-var shellSafeRe = regexp.MustCompile(`^[A-Za-z0-9_./:@%+=-]+$`)
-
-// shellQuote renders s safe to embed in an emitted shell command. Clearly
-// inert strings pass through bare; anything else is single-quoted — the one
-// POSIX form in which nothing substitutes — with embedded single quotes
-// spelled '\”. This is an encoding applied to every embedded value, not a
-// metacharacter list: breadcrumbs interpolate user- and API-controlled text,
-// and escaping cases one at a time is how quoting bugs recur.
-func shellQuote(s string) string {
-	if s != "" && shellSafeRe.MatchString(s) {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
+// shellQuote is richtext.ShellQuote under the name this package gave its own
+// copy, which this change removed. One call site is left — connect_run.go,
+// which another change owns — and this goes when that one moves.
+func shellQuote(s string) string { return richtext.ShellQuote(s) }
 
 // scopeProject resolves the project value a breadcrumb should carry: the
 // group-level flag, else the root-level --project (app.Flags.Project) — the
@@ -1935,7 +1920,7 @@ func breadcrumbScope(project string) string {
 	if project == "" {
 		return ""
 	}
-	return " --project " + shellQuote(project)
+	return " --project " + richtext.ShellQuote(project)
 }
 
 func newFilesUpdateCmd(project *string) *cobra.Command {
@@ -2155,8 +2140,7 @@ You can pass either an item ID or a Basecamp URL:
 							detectedType = "upload"
 						} else {
 							// All probes failed - check if first error was 404 or something else
-							sdkErr := basecamp.AsError(firstErr)
-							if sdkErr.Code != basecamp.CodeNotFound {
+							if sdkErr := basecamp.AsError(firstErr); sdkErr == nil || sdkErr.Code != basecamp.CodeNotFound {
 								// Return actual error (auth, permission, network, etc.)
 								return convertSDKError(firstErr)
 							}

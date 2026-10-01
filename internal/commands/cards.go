@@ -982,7 +982,7 @@ Use - as the body argument to read the body from stdin:
 				if err != nil {
 					return err
 				}
-				mentionResult, mentionErr := resolveMentions(cmd.Context(), app.Names, content)
+				mentionResult, mentionErr := resolveMentions(cmd.Context(), app.Names, mentionScope(app, resolvedProjectID), content)
 				if mentionErr != nil {
 					return mentionErr
 				}
@@ -1101,7 +1101,7 @@ You can pass either a card ID or a Basecamp URL:
 			}
 
 			// Extract ID from URL if provided
-			cardIDStr := extractID(args[0])
+			cardIDStr, urlProjectID := extractWithProject(args[0])
 
 			cardID, err := strconv.ParseInt(cardIDStr, 10, 64)
 			if err != nil {
@@ -1157,7 +1157,7 @@ You can pass either a card ID or a Basecamp URL:
 				if err != nil {
 					return err
 				}
-				mentionResult, mentionErr := resolveMentions(cmd.Context(), app.Names, html)
+				mentionResult, mentionErr := resolveMentions(cmd.Context(), app.Names, mentionScope(app, urlProjectID, projectFlagValue(cmd), app.Flags.Project), html)
 				if mentionErr != nil {
 					return mentionErr
 				}
@@ -3120,11 +3120,11 @@ func newCardsStepMoveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "move <step_id|url>",
 		Short: "Move a step",
-		Long: `Reposition a step within a card (0-indexed).
+		Long: `Reposition a step within a card (1-based: 1 is the top).
 
 You can pass either a step ID or a Basecamp URL:
-  basecamp cards step move 789 --card 456 --position 0 --in my-project
-  basecamp cards step move https://3.basecamp.com/123/buckets/456/card_tables/cards/steps/789 --card 456 --position 0`,
+  basecamp cards step move 789 --card 456 --position 1 --in my-project
+  basecamp cards step move https://3.basecamp.com/123/buckets/456/card_tables/cards/steps/789 --card 456 --position 1`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Show help when invoked with no card flag
@@ -3144,8 +3144,13 @@ You can pass either a step ID or a Basecamp URL:
 			if err != nil {
 				return output.ErrUsage("Step ID must be numeric")
 			}
-			if position < 0 {
-				return output.ErrUsage("--position is required (0-indexed)")
+			// bc3 has always counted step positions from 1; its docs once
+			// said "zero indexed", and the SDK now refuses 0.
+			if !cmd.Flags().Changed("position") && !cmd.Flags().Changed("pos") {
+				return output.ErrUsage("--position is required (1-based)")
+			}
+			if position < 1 {
+				return output.ErrUsage("--position must be 1 or more (1 = top)")
 			}
 
 			cardIDInt, err := strconv.ParseInt(cardID, 10, 64)
@@ -3167,8 +3172,8 @@ You can pass either a step ID or a Basecamp URL:
 	}
 
 	cmd.Flags().StringVarP(&cardID, "card", "c", "", "Card ID (required)")
-	cmd.Flags().IntVar(&position, "position", -1, "Target position (0-indexed)")
-	cmd.Flags().IntVar(&position, "pos", -1, "Target position (alias for --position)")
+	cmd.Flags().IntVar(&position, "position", 0, "Target position (1-based)")
+	cmd.Flags().IntVar(&position, "pos", 0, "Target position (alias for --position)")
 
 	return cmd
 }

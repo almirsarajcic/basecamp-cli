@@ -7,6 +7,8 @@ import (
 
 	"github.com/basecamp/basecamp-sdk/go/pkg/basecamp"
 	clioutput "github.com/basecamp/cli/output"
+
+	"github.com/basecamp/basecamp-cli/internal/resilience"
 )
 
 // Error is a structured error with code, message, and optional hint.
@@ -31,7 +33,17 @@ func ErrAmbiguous(resource string, matches []string) *Error {
 	return clioutput.ErrAmbiguous(resource, matches)
 }
 
+// AsError converts err to the CLI's structured error. An *Error already in
+// the chain is the CLI's own verdict and wins over the SDK error it may
+// wrap as its cause; only a bare SDK error is converted from its taxonomy.
 func AsError(err error) *Error {
+	if gateErr := AsGateError(err); gateErr != nil {
+		return gateErr
+	}
+	var cliErr *Error
+	if errors.As(err, &cliErr) {
+		return WithAuthHint(cliErr)
+	}
 	var sdkErr *basecamp.Error
 	if errors.As(err, &sdkErr) {
 		message := err.Error()
@@ -41,16 +53,54 @@ func AsError(err error) *Error {
 		if message == "" {
 			message = sdkErr.Message
 		}
-		return &Error{
+		return WithAuthHint(&Error{
 			Code:       sdkErr.Code,
 			Message:    message,
 			Hint:       sdkErr.Hint,
 			HTTPStatus: sdkErr.HTTPStatus,
 			Retryable:  sdkErr.Retryable,
 			Cause:      sdkErr,
-		}
+		})
 	}
-	return clioutput.AsError(err)
+	return WithAuthHint(clioutput.AsError(err))
+}
+
+// DefaultAuthHint is the remedy an auth_required error carries when nothing
+// closer to the credential has named one. The app boundary (appctx.App.Err)
+// replaces it with a remedy that knows the active profile and whether
+// BASECAMP_TOKEN is in play; this is the floor beneath that.
+const DefaultAuthHint = "Run: basecamp auth login"
+
+// WithAuthHint adds the login remedy to an auth_required error that has
+// none. A 401 from the API and the SDK's own auth errors arrive without a
+// hint, and "authentication required" alone leaves the reader to guess what
+// to run. Errors that already carry a hint, or are not auth errors, pass
+// through untouched; a hinted copy is returned so the caller's error is not
+// rewritten under it.
+func WithAuthHint(e *Error) *Error {
+	if e.Code != CodeAuth || e.Hint != "" {
+		return e
+	}
+	hinted := *e
+	hinted.Hint = DefaultAuthHint
+	return &hinted
+}
+
+// AsGateError converts a resilience gate rejection, which arrives through
+// any SDK operation, into the rate-limit error the user sees: the gate's own
+// message and hint (which limit, how long it waited, what to do), retryable.
+// Nil when err is not a gate rejection.
+func AsGateError(err error) *Error {
+	var gateErr *resilience.GateError
+	if !errors.As(err, &gateErr) {
+		return nil
+	}
+	return &Error{
+		Code:      CodeRateLimit,
+		Message:   gateErr.Message,
+		Hint:      gateErr.Hint,
+		Retryable: true,
+	}
 }
 
 // RequestID returns the SDK request ID carried by err, if present.
@@ -68,8 +118,20 @@ func ErrAuth(msg string) *Error {
 	return &Error{
 		Code:    CodeAuth,
 		Message: msg,
-		Hint:    "Run: basecamp auth login",
+		Hint:    DefaultAuthHint,
 	}
+}
+
+// ErrInterrupted reports a command stopped by the person at the terminal.
+// msg is for machine consumers; the command prints its own human line.
+func ErrInterrupted(msg string) *Error {
+	return &Error{Code: CodeInterrupted, Message: msg}
+}
+
+// ErrTerminated reports a command stopped by a SIGTERM while it waited.
+// msg is for machine consumers; the command prints its own human line.
+func ErrTerminated(msg string) *Error {
+	return &Error{Code: CodeTerminated, Message: msg}
 }
 
 func ErrForbiddenScope() *Error {

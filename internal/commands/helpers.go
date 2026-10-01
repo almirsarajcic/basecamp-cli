@@ -632,19 +632,32 @@ func applySubscribeFlags(ctx context.Context, resolver *names.Resolver, subscrib
 // resolveMentions scans HTML for mention syntax and replaces matches with
 // Basecamp mention attachment tags. Supports three syntaxes:
 //   - [@Name](mention:SGID) — zero API calls (SGID embedded directly)
-//   - [@Name](person:ID) — one API call (ID→SGID via pingable set)
-//   - @Name / @First.Last — fuzzy name resolution via pingable set
+//   - [@Name](person:ID) — one API call (ID→SGID via pingable set; an agent's
+//     ID costs one more, a person lookup)
+//   - @Name / @First.Last — fuzzy name resolution via pingable set, then the
+//     agents on the project in scope
 //
 // Also supports @sgid:VALUE inline syntax for pipeline composability.
 // Silently returns unchanged HTML if no mentions are found.
 //
+// Agents cannot be pinged, so the pingable set never holds them. scope names
+// the project whose agents a fuzzy @Name may reach; it is consulted only when
+// the pingable set has no exact answer, and may be nil when the command has
+// no project in scope.
+//
 // Fuzzy @Name mentions that cannot be resolved (not found or ambiguous) are
 // left as plain text; their names are returned in the Unresolved slice.
 // Deterministic syntaxes (mention:SGID, person:ID) still hard-fail on error.
-func resolveMentions(ctx context.Context, resolver *names.Resolver, html string) (richtext.MentionResult, error) {
+func resolveMentions(ctx context.Context, resolver *names.Resolver, scope names.ProjectScope, html string) (richtext.MentionResult, error) {
 	return richtext.ResolveMentions(html,
 		func(name string) (string, string, error) {
-			person, err := resolver.ResolvePersonByName(ctx, name)
+			person, err := resolver.ResolveMentionByName(ctx, name, scope)
+			// A project that cannot be resolved is the command's error, not a
+			// missed mention: never downgrade it to plain text.
+			var scopeErr *names.ScopeError
+			if errors.As(err, &scopeErr) {
+				return "", "", scopeErr.Err
+			}
 			if err != nil {
 				// Downgrade resolver-level not-found and ambiguous to skip — leave
 				// as plain text. Only match errors without an HTTP status; API-level
@@ -667,7 +680,7 @@ func resolveMentions(ctx context.Context, resolver *names.Resolver, html string)
 			if err != nil {
 				return "", "", output.ErrUsage(fmt.Sprintf("invalid person ID %q — must be numeric", id))
 			}
-			person, err := resolver.ResolvePersonByID(ctx, personID)
+			person, err := resolver.ResolveMentionByID(ctx, personID)
 			if err != nil {
 				return "", "", err
 			}
@@ -679,12 +692,128 @@ func resolveMentions(ctx context.Context, resolver *names.Resolver, html string)
 	)
 }
 
+// mentionScope returns the project a fuzzy @mention may draw agents from: the
+// first non-blank candidate, in the caller's order of precedence — typically
+// a project the command already resolved, a URL's bucket, then --in. A
+// numeric ID is used as-is; a name is resolved only when the scope is
+// consulted. Returns nil when every candidate is blank.
+func mentionScope(app *appctx.App, candidates ...string) names.ProjectScope {
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if scope := names.ParseProjectScope(candidate); scope != nil {
+			return scope
+		}
+		return func(ctx context.Context) (int64, error) {
+			id, _, err := app.Names.ResolveProject(ctx, candidate)
+			if err != nil {
+				return 0, err
+			}
+			return strconv.ParseInt(id, 10, 64)
+		}
+	}
+	return nil
+}
+
+// sameProjectID compares two project IDs as numbers, so "00123" and "123"
+// name the same project. Non-numeric values compare as text.
+func sameProjectID(a, b string) bool {
+	x, errA := strconv.ParseInt(a, 10, 64)
+	y, errB := strconv.ParseInt(b, 10, 64)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	return x == y
+}
+
+// batchMentionScope returns the mention scope for a comments create target
+// list. One resolved mention goes to every target, so the scope must be a
+// project every target is known to be in; anything less leaves agents out of
+// scope and a fuzzy agent mention stays text, with the unresolved notice. It
+// never refuses the command: which targets are posted to is decided exactly
+// as before, with a URL's bucket winning over --in.
+//
+//   - Every target a URL in one bucket: that bucket.
+//   - Only bare IDs: --in, if given.
+//   - URLs in one bucket plus bare IDs: that bucket, if --in names it too
+//     (--in is what vouches for the bare IDs).
+//   - URLs in different buckets: none.
+//
+// Tokens that are neither a URL nor a number are skipped by the posting loop,
+// so they are skipped here too. A named --in is resolved only if the scope is
+// consulted.
+func batchMentionScope(cmd *cobra.Command, app *appctx.App, targets string) names.ProjectScope {
+	urlProject, bare := "", false
+	for part := range strings.SplitSeq(targets, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		recordingID, projectID := extractWithProject(part)
+		if _, err := strconv.ParseInt(recordingID, 10, 64); err != nil {
+			continue
+		}
+		switch {
+		case projectID == "":
+			bare = true
+		case urlProject != "" && !sameProjectID(urlProject, projectID):
+			return nil
+		default:
+			urlProject = projectID
+		}
+	}
+
+	explicit := projectFlagValue(cmd)
+	if explicit == "" {
+		explicit = app.Flags.Project
+	}
+	switch {
+	case urlProject == "":
+		return mentionScope(app, explicit)
+	case !bare:
+		return mentionScope(app, urlProject)
+	case explicit == "":
+		return nil
+	}
+
+	vouched := mentionScope(app, explicit)
+	if vouched == nil {
+		return nil
+	}
+	return func(ctx context.Context) (int64, error) {
+		id, err := vouched(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if !sameProjectID(strconv.FormatInt(id, 10), urlProject) {
+			return 0, nil
+		}
+		return id, nil
+	}
+}
+
 // unresolvedMentionWarning formats a warning string for unresolved mentions.
+// The hint names the one way a fuzzy @Name reaches an agent, since a
+// mention meant for an agent is the miss a reader cannot otherwise explain.
 func unresolvedMentionWarning(unresolved []string) string {
 	if len(unresolved) == 0 {
 		return ""
 	}
-	return "Unresolved mentions left as text: " + strings.Join(unresolved, ", ")
+	return "Unresolved mentions left as text: " + strings.Join(unresolved, ", ") +
+		" (agents match by name only among the people on the command's project; name it with --in or a URL if the command has none; [@Name](person:ID) needs no project)"
+}
+
+// projectFlagValue returns the --project/--in value visible to cmd, including
+// one a parent command group defines, or "" when neither flag exists.
+func projectFlagValue(cmd *cobra.Command) string {
+	for _, name := range []string{"project", "in"} {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Value.String() != "" {
+			return f.Value.String()
+		}
+	}
+	return ""
 }
 
 // projectFlagChanged reports whether the user explicitly passed --project or

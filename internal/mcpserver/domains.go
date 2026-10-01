@@ -26,8 +26,8 @@ var DomainSpecs = []catalog.DomainSpec{
 	},
 	{
 		Key:   "todos",
-		Tags:  []string{"Todos"},
-		Blurb: "Todos, todolists, todolist groups, and todosets — plus each todolist's hill chart.",
+		Tags:  []string{"Todos", "Subtasks"},
+		Blurb: "Todos, todolists, todolist groups, and todosets — plus each todolist's hill chart, and the subtasks on to-dos and cards.",
 	},
 	{
 		Key:   "cards",
@@ -62,22 +62,27 @@ var DomainSpecs = []catalog.DomainSpec{
 	{
 		Key:   "people",
 		Tags:  []string{"People"},
-		Blurb: "People and access: profiles, pingable people, project access, out-of-office, preferences, and notification subscriptions.",
+		Blurb: "People and access: profiles, pingable and assignable people, project access, out-of-office, preferences, and notification subscriptions.",
 	},
 	{
 		Key:   "automation",
-		Tags:  []string{"Automation"},
-		Blurb: "Automatic check-ins (questionnaires, questions, answers, reminders), project templates, webhooks, lineup markers, dock tools, recording lifecycle (archive/trash), change events, and search.",
+		Tags:  []string{"Checkins", "Templates", "Webhooks", "Lineup", "Dock", "Recordings", "Search"},
+		Blurb: "Automatic check-ins (questionnaires, questions, answers, reminders), project templates and the template library, webhooks, lineup markers, dock tools, recording lifecycle (archive/trash), change events, and search.",
 	},
 	{
 		Key:   "reports",
-		Tags:  []string{"Reports"},
+		Tags:  []string{"Reports", "Timeline"},
 		Blurb: "Reports and timelines: progress, assigned and overdue todos, upcoming schedule, per-person progress, and project timelines.",
 	},
 	{
 		Key:   "everything",
 		Tags:  []string{"Everything"},
 		Blurb: "Account-wide feeds: every checkin, comment, file, forward, and message, and cards and todos filtered by state (open, completed, overdue, unassigned, no due date, not now).",
+	},
+	{
+		Key:   "eventfeed",
+		Tags:  []string{"EventFeed"},
+		Blurb: "The account event feed: poll events from a resumable position, and poll the agent inbox of addressed items. Pages carry a position and a continuation URL rather than page numbers; deduplicate events by id and inbox items by addressing_id, and refetch the referenced recording before acting on it. Minting a live-stream ticket is not served here — the ticket is a bearer this surface cannot use, and 'basecamp events ticket' is where it lives.",
 	},
 	{
 		Key:   "clientside",

@@ -4,6 +4,7 @@ package auth
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -102,7 +103,34 @@ type Manager struct {
 	// traffic, a malformed opt-out value). Test seam; nil means stderr.
 	Warnf func(format string, args ...any)
 
+	// clock is the time a remembered mint verdict is read and written
+	// against (agent_hold.go). Test seam; nil means time.Now.
+	clock func() time.Time
+
 	mu sync.Mutex
+
+	// kindMu guards kind, which is read while building an error's remedy
+	// and so cannot share the lock the credential operations hold.
+	kindMu sync.Mutex
+	kind   credentialKind
+}
+
+// credentialKind is what the credential in play turned out to be, kept so
+// an error's remedy can name the right login without going back to the
+// store for it.
+//
+// Rendering an error must not be able to block, and a store read can: it
+// is usually the OS keyring, and a keychain that locks after its
+// availability probe waits on a person who may never answer, inside a
+// child process nothing can cancel. A long-running connector reporting a
+// 401 would hang there, building a hint. Every path that raises such an
+// error has just had the credential in its hands, so the answer is already
+// known and only has to be kept. Nothing secret is: what the credential
+// was, and the public client id an agent mints with.
+type credentialKind struct {
+	agent    bool
+	clientID string
+	scope    string
 }
 
 // NewManager creates a new auth manager.
@@ -119,119 +147,422 @@ func NewManager(cfg *config.Config, httpClient *http.Client) *Manager {
 	}
 }
 
+// ProfileCredentialKey is the credential key a named profile's credential
+// is stored under, for a caller that must name one profile's credential
+// without a manager bound to it.
+func ProfileCredentialKey(profile string) string { return "profile:" + profile }
+
 // credentialKey returns the storage key for credentials.
 // Profile mode: "profile:<name>", No-profile mode: origin URL.
 func (m *Manager) credentialKey() string {
 	if m.cfg.ActiveProfile != "" {
-		return "profile:" + m.cfg.ActiveProfile
+		return ProfileCredentialKey(m.cfg.ActiveProfile)
 	}
 	return config.NormalizeBaseURL(m.cfg.BaseURL)
 }
 
-// AccessToken returns a valid access token, refreshing if needed.
+// LoginCommand is the command that re-establishes the active credential:
+// addressed to the active profile when there is one, since a bare login
+// would store the new credential under the base URL instead. The command
+// is meant to be pasted, so every interpolated value is shell-quoted.
+func (m *Manager) LoginCommand() string {
+	command, _ := m.loginRemedy()
+	return command
+}
+
+// loginRemedy is the command that re-establishes the active credential and
+// the words that introduce it.
+//
+// An agent profile gets the client-credentials login, not the interactive
+// one. `basecamp auth login` signs a PERSON in, so an operator who
+// followed it after an agent's credential failed would store their own
+// credential under the agent's profile and only find out later — and that
+// remedy is what every auth_required error about the credential ends up
+// carrying, from the mint's own refusals to a 401 the SDK classified far
+// from here.
+//
+// Deciding it here rather than at each error site is the point: an error
+// path added later cannot forget. It reads nothing — the answer comes from
+// what the Manager last had in its hands (see credentialKind), because
+// this is reached FROM a failure and must not be able to turn one into a
+// hang.
+func (m *Manager) loginRemedy() (command, lead string) {
+	// From what was remembered, never from a fresh read: this is reached
+	// FROM a failure, and must not be able to turn one into a hang. See
+	// credentialKind. Nothing remembered means the interactive form, which
+	// is the right answer for every profile that is not an agent's and a
+	// harmless one for an agent nobody has loaded yet.
+	if kind := m.rememberedKind(); kind.agent {
+		return m.agentLoginCommand(kind.clientID, kind.scope), "Pipe the agent's client secret in:"
+	}
+	if m.cfg.ActiveProfile != "" {
+		return "basecamp auth login -P " + richtext.ShellQuote(m.cfg.ActiveProfile), "Run:"
+	}
+	return "basecamp auth login", "Run:"
+}
+
+// remember records what the credential in play is, for the remedy an
+// error will carry. Every Manager path that gets its hands on a
+// credential — serving a token, renewing one, storing one, answering
+// whether there is one, reporting on one — calls this, because a remedy
+// built from nothing names the interactive login, and that is the one
+// answer an agent profile must never be given.
+//
+// See credentialKind.
+func (m *Manager) remember(creds *Credentials) {
+	m.kindMu.Lock()
+	defer m.kindMu.Unlock()
+	m.kind = credentialKind{agent: creds.OAuthType == oauthTypeAgent, clientID: creds.ClientID, scope: creds.Scope}
+}
+
+// rememberedKind is what the last credential this Manager handled was.
+func (m *Manager) rememberedKind() credentialKind {
+	m.kindMu.Lock()
+	defer m.kindMu.Unlock()
+	return m.kind
+}
+
+// LoginHint is LoginCommand as an error hint.
+func (m *Manager) LoginHint() string {
+	command, lead := m.loginRemedy()
+	return lead + " " + command
+}
+
+// errAuth is an auth_required error whose remedy names the active profile.
+func (m *Manager) errAuth(msg string) *output.Error {
+	e := output.ErrAuth(msg)
+	e.Hint = m.LoginHint()
+	return e
+}
+
+// hintLogin gives an auth_required error that carries no remedy, or only
+// the profile-less default, the login naming the active profile; every
+// other error passes through unchanged. The error is copied rather than
+// rewritten: a lane client's setup error is cached and returned to every
+// later caller.
+func (m *Manager) hintLogin(err error) error {
+	var e *output.Error
+	if !errors.As(err, &e) || e.Code != output.CodeAuth || (e.Hint != "" && e.Hint != output.DefaultAuthHint) {
+		return err
+	}
+	hinted := *e
+	hinted.Hint = m.LoginHint()
+	return &hinted
+}
+
+// AccessToken returns a valid access token, renewing it if needed.
 // If BASECAMP_TOKEN env var is set, it's used directly without OAuth.
 func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	// Check for BASECAMP_TOKEN environment variable first
 	if token := os.Getenv("BASECAMP_TOKEN"); token != "" {
 		return token, nil
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	credKey := m.credentialKey()
-	creds, err := m.store.Load(credKey)
-	if err != nil {
-		return "", output.ErrAuth(fmt.Sprintf("Not authenticated for %s: %v", credKey, err))
-	}
-
-	// Check if token is expired (with 5 minute buffer).
-	// ExpiresAt==0 means non-expiring token (e.g., from BASECAMP_TOKEN env var),
-	// so only refresh if ExpiresAt > 0 and is within the expiry window.
-	if creds.ExpiresAt > 0 && time.Now().Unix() >= creds.ExpiresAt-int64(RefreshWindow.Seconds()) {
-		if err := m.refreshLocked(ctx, credKey, creds); err != nil {
-			return "", err
-		}
-		// Reload refreshed credentials
-		creds, err = m.store.Load(credKey)
-		if err != nil {
-			return "", output.ErrAuth(fmt.Sprintf("Failed to load refreshed credentials for %s: %v", credKey, err))
-		}
-	}
-
-	if creds.AccessToken == "" {
-		return "", output.ErrAuth(fmt.Sprintf("Stored credentials for %s have empty access token", credKey))
-	}
-
-	return creds.AccessToken, nil
+	return m.storedAccessToken(ctx, "Not authenticated for")
 }
 
 // StoredAccessToken returns a valid access token from the credential store,
-// refreshing if needed. Unlike AccessToken, this ignores the BASECAMP_TOKEN
+// renewing it if needed. Unlike AccessToken, this ignores the BASECAMP_TOKEN
 // environment variable and always uses stored OAuth credentials.
 func (m *Manager) StoredAccessToken(ctx context.Context) (string, error) {
+	return m.storedAccessToken(ctx, "No stored credentials for")
+}
+
+// storedAccessToken serves the stored credential's access token, renewing
+// it first when it is inside the refresh window. missing is how the absence
+// of a credential is phrased for the caller that asked.
+//
+// Renewal is the cross-process critical section, and it is taken in that
+// order deliberately: acquire the credential key's lock, re-load the
+// credential UNDER it, and check the expiry AGAIN. The second check is what
+// keeps twenty concurrent commands from making twenty token requests — the
+// first through renews, the rest find the fresh credential waiting and send
+// nothing — and holding the lock across load, renew and save is what keeps
+// a rotated refresh token safe, since no other process can be between its
+// own load and save while this one holds it.
+//
+// The fast path — a credential comfortably inside its lifetime, which is
+// every command in a normal hour — takes no KEY lock: there is nothing to
+// renew, so nothing for it to be exclusive with. The read itself is still
+// taken under the store's shared lock on the file backend, because
+// replacing credentials.json is not atomic on every platform; readers
+// never queue behind each other there, only behind a writer, and no
+// network happens under that lock.
+func (m *Manager) storedAccessToken(ctx context.Context, missing string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	credKey := m.credentialKey()
-	creds, err := m.store.Load(credKey)
+	creds, err := m.store.LoadContext(ctx, credKey)
 	if err != nil {
-		return "", output.ErrAuth(fmt.Sprintf("No stored credentials for %s: %v", credKey, err))
+		return "", m.unreadable(missing, credKey, err)
+	}
+	m.remember(creds)
+	if !needsRenewal(creds) {
+		return m.servableToken(credKey, creds)
 	}
 
-	// Check if token is expired (with the refresh-window buffer)
-	if creds.ExpiresAt > 0 && time.Now().Unix() >= creds.ExpiresAt-int64(RefreshWindow.Seconds()) {
-		if err := m.refreshLocked(ctx, credKey, creds); err != nil {
-			// Preserve the original error type (API, network, etc.)
-			return "", err
+	var token string
+	err = m.store.withKeyLock(ctx, credKey, func() error {
+		creds, loadErr := m.store.LoadContext(ctx, credKey)
+		if loadErr != nil {
+			return m.unreadable(missing, credKey, loadErr)
 		}
-		// Reload refreshed credentials
-		creds, err = m.store.Load(credKey)
-		if err != nil {
-			return "", output.ErrAuth(fmt.Sprintf("Failed to load refreshed credentials for %s: %v", credKey, err))
+		m.remember(creds)
+		if needsRenewal(creds) {
+			// Preserves the renewal's own error type (API, network, auth).
+			if renewErr := m.renewLocked(ctx, credKey, creds); renewErr != nil {
+				return renewErr
+			}
+			// Read back what the renewal stored rather than trusting the
+			// in-memory copy: a refusal that another process's rotation
+			// had already answered leaves the store, not this copy,
+			// holding the live credential.
+			if creds, loadErr = m.store.LoadContext(ctx, credKey); loadErr != nil {
+				return m.unreadable("Failed to load renewed credentials for", credKey, loadErr)
+			}
+		}
+		var tokenErr error
+		token, tokenErr = m.servableToken(credKey, creds)
+		return tokenErr
+	})
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// needsRenewal reports whether a stored access token is inside the refresh
+// window and must be renewed before it is served. ExpiresAt==0 means a
+// non-expiring token (an imported personal access token, or a server that
+// reported no expiry) and is never renewed.
+//
+// A credential carrying RenewAfter can push the moment LATER than the
+// default margin, never earlier: that is for a token whose whole lifetime
+// is shorter than the window, which would otherwise be renewed on every
+// command.
+func needsRenewal(creds *Credentials) bool {
+	if creds.ExpiresAt <= 0 {
+		return false
+	}
+	renewAt := creds.ExpiresAt - int64(RefreshWindow.Seconds())
+	if creds.RenewAfter > renewAt {
+		// Never past the expiry itself: a stale or corrupt RenewAfter must
+		// not be able to keep an expired token in service.
+		renewAt = min(creds.RenewAfter, creds.ExpiresAt)
+	}
+	return time.Now().Unix() >= renewAt
+}
+
+// unreadable is the error for a credential the store would not give up.
+//
+// "Not authenticated" is the right answer only when the store SPOKE: it
+// has no such credential, or one nothing can read. A store that could not
+// be reached — a lock another process is holding, a keyring that would not
+// open — is not a statement about the credential, and turning it into one
+// would send the operator to a login that fixes nothing and throw away a
+// classification (retryable, rate-limited) the caller can act on.
+func (m *Manager) unreadable(missing, credKey string, err error) error {
+	switch {
+	case errors.Is(err, ErrNoCredential), errors.Is(err, ErrInvalidCredentials):
+		// The store spoke: nothing is stored, or nothing readable is.
+		// That IS "not authenticated", and a login is the remedy.
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// The caller's own wait ended. Theirs to report, and the error
+		// must stay matchable as what it is.
+		return err
+	default:
+		var e *output.Error
+		if errors.As(err, &e) && e.Code != output.CodeAuth {
+			// Already classified as something other than an auth failure
+			// — contention, above all. Keep the class and the remedy it
+			// came with.
+			return err
 		}
 	}
+	return m.errAuth(fmt.Sprintf("%s %s: %v", missing, credKey, err))
+}
 
+// servableToken is creds' access token, or the auth error for a credential
+// that holds none.
+func (m *Manager) servableToken(credKey string, creds *Credentials) (string, error) {
 	if creds.AccessToken == "" {
-		return "", output.ErrAuth(fmt.Sprintf("Stored credentials for %s have empty access token", credKey))
+		return "", m.errAuth(fmt.Sprintf("Stored credentials for %s have empty access token", credKey))
 	}
-
 	return creds.AccessToken, nil
 }
 
-// IsAuthenticated checks if there are valid credentials.
-// Returns true if BASECAMP_TOKEN env var is set or if OAuth credentials exist.
+// IsAuthenticated reports whether a credential is stored, answering false
+// for anything it could not read — as it has always done for an unreadable
+// keyring. Returns true if BASECAMP_TOKEN env var is set or if OAuth
+// credentials exist.
+//
+// Use CheckAuthenticated where a false STOPS something: this one cannot
+// tell "nothing is stored" from "I could not look".
 func (m *Manager) IsAuthenticated() bool {
 	// Check for BASECAMP_TOKEN environment variable first
 	if os.Getenv("BASECAMP_TOKEN") != "" {
 		return true
 	}
 
-	credKey := m.credentialKey()
-	creds, err := m.store.Load(credKey)
+	creds, err := m.store.Load(m.credentialKey())
 	if err != nil {
 		return false
 	}
+	m.remember(creds)
 	return creds.AccessToken != ""
 }
 
-// Refresh forces a token refresh.
+// CheckAuthenticated is IsAuthenticated for a caller that ACTS on the
+// answer rather than printing it: whether a credential is stored, and
+// separately why it could not tell.
+//
+// A bool cannot carry "I could not reach the store", and a gate that reads
+// that as "you are not logged in" refuses work for a credential that is
+// sitting right there — a store lock another process holds for the length
+// of one write, a keyring that will not open, a wait the person canceled.
+// Anything that stops a command uses this and says which it was; the bool
+// form stays for the reports and prompts that only need a hint.
+func (m *Manager) CheckAuthenticated(ctx context.Context) (bool, error) {
+	if os.Getenv("BASECAMP_TOKEN") != "" {
+		return true, nil
+	}
+
+	creds, err := m.store.LoadContext(ctx, m.credentialKey())
+	switch {
+	case errors.Is(err, ErrNoCredential), errors.Is(err, ErrInvalidCredentials):
+		// The store spoke: there is nothing stored, or nothing readable.
+		// A login is the answer, and the caller may go and get one.
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	m.remember(creds)
+	if creds.AccessToken == "" {
+		// Stored, and unusable. That is NOT the same as nothing being
+		// stored: a caller that reads this as "go and log in" would, for
+		// an agent profile, sign a person in over it. It is a broken
+		// credential, and the remedy is the one for what it is — which
+		// errAuth takes from what was just remembered.
+		return false, m.errAuth(fmt.Sprintf("Stored credentials for %s have empty access token", m.credentialKey()))
+	}
+	return true, nil
+}
+
+// Refresh forces a token renewal whatever the stored expiry says. The
+// credential is loaded under the cross-process lock, so the credential it
+// renews is the one it saves.
 func (m *Manager) Refresh(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	credKey := m.credentialKey()
-	creds, err := m.store.Load(credKey)
-	if err != nil {
-		return output.ErrAuth(fmt.Sprintf("Not authenticated for %s: %v", credKey, err))
-	}
-
-	return m.refreshLocked(ctx, credKey, creds)
+	return m.store.withKeyLock(ctx, credKey, func() error {
+		creds, err := m.store.LoadContext(ctx, credKey)
+		if err != nil {
+			return m.unreadable("Not authenticated for", credKey, err)
+		}
+		m.remember(creds)
+		return m.renewLocked(ctx, credKey, creds)
+	})
 }
 
+// renewLocked produces a fresh access token for creds and stores it. An
+// agent credential has no refresh token to rotate — it mints a new
+// self-token from its client credentials — and every other kind refreshes.
+//
+// The caller holds m.mu and the credential key's cross-process lock.
+func (m *Manager) renewLocked(ctx context.Context, origin string, creds *Credentials) error {
+	if creds.OAuthType == oauthTypeAgent {
+		return m.hintLogin(m.mintAgentCredential(ctx, origin, creds))
+	}
+	return m.refreshLocked(ctx, origin, creds)
+}
+
+// invalidGrantPrefix is how the SDK's token exchanger renders an RFC 6749
+// token-endpoint error: it returns the response as an untyped error, so the
+// OAuth error code is recoverable only from the message. Coupled to
+// basecamp-sdk oauth.Exchanger; a re-pin that types the error can replace
+// the string match.
+const invalidGrantPrefix = "token error: invalid_grant"
+
+// invalidGrant reports whether a refresh was refused with invalid_grant —
+// the refresh token is expired, revoked, or reused — and returns the
+// server's error_description when it sent one.
+func invalidGrant(err error) (string, bool) {
+	rest, ok := strings.CutPrefix(err.Error(), invalidGrantPrefix)
+	switch {
+	case !ok:
+		return "", false
+	case rest == "":
+		return "", true
+	default:
+		return strings.CutPrefix(rest, " - ")
+	}
+}
+
+// forgetRefusedGrant deletes the stored credential only while it still
+// carries the refresh token the server just refused. Two processes used to
+// be able to enter the refresh window together — the first rotating and
+// saving, the second refused for reusing the old token — and an
+// unconditional delete here would have thrown away the fresh credential the
+// first one stored. The cross-process lock (lock.go) now keeps them out of
+// each other's refresh entirely, so this re-read no longer has a race to
+// close; it is kept because a host where the lock could not be taken at all
+// falls back to exactly the unsynchronized behavior it was written for.
+//
+// It reports whether the store holds a credential other than the refused
+// one — another process's rotation, which is a live credential the caller
+// can reload rather than a session that has ended.
+func (m *Manager) forgetRefusedGrant(origin, refusedToken string) (rotated bool) {
+	current, err := m.store.Load(origin)
+	if err != nil {
+		return false
+	}
+	if current.RefreshToken != refusedToken {
+		return true
+	}
+	if err := m.store.Delete(origin); err != nil {
+		m.warnf("could not forget the refused credential for %s: %v", origin, err)
+	}
+	return false
+}
+
+// RefreshRefusal is the error renewing creds would fail with before
+// anything is sent — no refresh token, a grant from the removed bc3
+// development flow, a missing or unusable token endpoint, a half-configured
+// OAuth client, an agent credential missing the client that mints its
+// tokens — or nil when a renewal would be attempted. It runs the same
+// preparation the renewal does, on a copy, for a report that must say what
+// the next command will do without doing it.
+func (m *Manager) RefreshRefusal(creds *Credentials) error {
+	// The caller handed over the credential, so this is a chance to learn
+	// what it is that costs nothing — and the report this feeds is exactly
+	// where naming the wrong login would hurt.
+	m.remember(creds)
+	prepared := *creds
+	if creds.OAuthType == oauthTypeAgent {
+		_, err := m.prepareAgentMint(&prepared)
+		return err
+	}
+	_, _, err := m.prepareRefresh(&prepared)
+	return err
+}
+
+// refreshLocked rotates the stored credential under the manager lock. The
+// credential is the active profile's, so whatever auth-class failure the
+// refresh hits — an unusable stored endpoint, a half-configured OAuth
+// client, a refused grant — the remedy is the login that writes that
+// profile's credential, not the bare one.
 func (m *Manager) refreshLocked(ctx context.Context, origin string, creds *Credentials) error {
+	return m.hintLogin(m.refreshCredential(ctx, origin, creds))
+}
+
+// prepareRefresh is the half of a refresh that sends nothing: it migrates
+// the credential's missing fields in place, checks what it holds, and
+// resolves the client and lane the request would go out through.
+func (m *Manager) prepareRefresh(creds *Credentials) (oauth.RefreshRequest, *oauth.Exchanger, error) {
 	if creds.RefreshToken == "" {
-		return output.ErrAuth("No refresh token available")
+		return oauth.RefreshRequest{}, nil, m.errAuth("No refresh token available")
 	}
 
 	// Migrate old credentials missing OAuthType
@@ -242,11 +573,11 @@ func (m *Manager) refreshLocked(ctx context.Context, origin string, creds *Crede
 	// Migrate old credentials missing TokenEndpoint
 	if creds.TokenEndpoint == "" {
 		if creds.OAuthType == "bc3" || creds.OAuthType == oauthTypeBC5 {
-			return output.ErrAuth("Stored credentials missing token endpoint — please re-authenticate: basecamp auth login")
+			return oauth.RefreshRequest{}, nil, m.errAuth("Stored credentials are missing their token endpoint and cannot be refreshed")
 		}
 		lpURL, lpErr := m.launchpadURL()
 		if lpErr != nil {
-			return lpErr
+			return oauth.RefreshRequest{}, nil, lpErr
 		}
 		creds.TokenEndpoint = lpURL + "/authorization/token"
 	}
@@ -259,7 +590,7 @@ func (m *Manager) refreshLocked(ctx context.Context, origin string, creds *Crede
 	// empty-host, or opaque/malformed https forms, so apply the same strict
 	// check used for the other OAuth endpoints before any POST.
 	if err := requireSecureOAuthEndpoint("token endpoint", tokenEndpoint); err != nil {
-		return err
+		return oauth.RefreshRequest{}, nil, err
 	}
 
 	// Resolve client credentials for the refresh request
@@ -268,14 +599,14 @@ func (m *Manager) refreshLocked(ctx context.Context, origin string, creds *Crede
 	case "bc3":
 		// DCR-era development flow, removed. Its per-install dynamic clients
 		// can't be resolved anymore, so the refresh token is unusable.
-		return output.ErrAuth("Stored credentials are from a removed development flow — please re-authenticate: basecamp auth login")
+		return oauth.RefreshRequest{}, nil, m.errAuth("Stored credentials are from a removed development flow and cannot be refreshed")
 	case oauthTypeBC5:
 		// Pre-registered public client: no secret.
 		clientID = bc5ClientID
 	default:
 		// Launchpad (or old credentials defaulted to launchpad)
 		if envCreds, err := resolveClientCredentials(func(string) {}); err != nil {
-			return err
+			return oauth.RefreshRequest{}, nil, err
 		} else if envCreds != nil {
 			clientID = envCreds.ClientID
 			clientSecret = envCreds.ClientSecret
@@ -294,7 +625,7 @@ func (m *Manager) refreshLocked(ctx context.Context, origin string, creds *Crede
 		laneClient, laneErr = m.bc5Client()
 	}
 	if laneErr != nil {
-		return laneErr
+		return oauth.RefreshRequest{}, nil, laneErr
 	}
 	exchanger := oauth.NewExchanger(laneClient)
 
@@ -309,9 +640,46 @@ func (m *Manager) refreshLocked(ctx context.Context, origin string, creds *Crede
 		UseLegacyFormat: creds.OAuthType == oauthTypeLaunchpad,
 	}
 
+	return req, exchanger, nil
+}
+
+func (m *Manager) refreshCredential(ctx context.Context, origin string, creds *Credentials) error {
+	req, exchanger, err := m.prepareRefresh(creds)
+	if err != nil {
+		return err
+	}
+
 	token, err := exchanger.Refresh(ctx, req)
 	if err != nil {
-		return wrapOAuthError("token refresh failed", err)
+		desc, dead := invalidGrant(err)
+		if !dead {
+			return wrapOAuthError("token refresh failed", err)
+		}
+		// The grant is gone for good, so the credential is forgotten now
+		// rather than re-tried by every later command: Basecamp's abuse
+		// tracker bans the client and address after a handful of
+		// invalid_grant failures, which would turn one expired session
+		// into a lockout. Only a BC5 credential is forgotten: its client is
+		// the fixed public one, so the refusal can only be about the grant.
+		// A Launchpad refresh sends whatever client the environment names,
+		// and the server answers invalid_grant for a token issued to a
+		// different client too, which is not proof the grant is dead. The
+		// delete's own outcome cannot change the answer — the session is
+		// over either way.
+		if creds.OAuthType == oauthTypeBC5 && m.forgetRefusedGrant(origin, creds.RefreshToken) {
+			// Another process rotated the credential while this refresh
+			// was in flight: the store holds a live one, which the callers
+			// reload, so this refresh has succeeded by proxy.
+			return nil
+		}
+		msg := "Your session has expired or was revoked"
+		if creds.OAuthType != oauthTypeBC5 {
+			msg = "The refresh token was refused: the session has expired or was revoked, or BASECAMP_OAUTH_CLIENT_ID/SECRET name a different OAuth client than the one it was issued to"
+		}
+		if desc = strings.TrimSpace(richtext.SanitizeSingleLine(desc)); desc != "" {
+			msg += " (" + desc + ")"
+		}
+		return m.errAuth(msg)
 	}
 
 	creds.AccessToken = token.AccessToken
@@ -331,15 +699,25 @@ func (m *Manager) refreshLocked(ctx context.Context, origin string, creds *Crede
 		// so this won't re-trigger refresh on the next call.
 		creds.ExpiresAt = 0
 	}
+	// A refreshed token takes the default renewal margin; only a minted
+	// self-token sets its own, and leaving a stale one here would date the
+	// new expiry against the old token's lifetime.
+	creds.RenewAfter = 0
 
 	return m.store.Save(origin, creds)
 }
 
-// LoginResult holds the outcome of a successful Login().
-// Callers use this to determine the effective scope instead of their input.
+// LoginResult holds the outcome of a successful login — Login()'s, or
+// LoginClientCredentials()'s. Callers use this to determine the effective
+// scope instead of their input.
 type LoginResult struct {
-	OAuthType string // "bc5" or "launchpad" (stored credentials may also carry legacy "bc3")
-	Scope     string // effective scope: "read"/"full" for BC5, "" for Launchpad
+	// OAuthType is "bc5", "launchpad", or "agent" for a login that minted
+	// an agent's self-token. Stored credentials may also carry legacy
+	// "bc3", which no login produces.
+	OAuthType string
+	// Scope is the effective scope: "read"/"full" for BC5 and for an
+	// agent, "" for Launchpad, which has no scopes.
+	Scope string
 }
 
 // LoginOptions configures the login flow.
@@ -389,6 +767,18 @@ type LoginOptions struct {
 	// If nil, messages are suppressed for headless/SDK use.
 	Logger func(msg string)
 
+	// Progress, when it is a terminal, carries the live wait line drawn
+	// while the device flow polls for approval (spinner and expiry
+	// countdown, redrawn in place). Any other writer, or nil, gets a static
+	// "Waiting for approval" line through Logger instead.
+	Progress io.Writer
+
+	// headlessReason is why defaults() turned the browser launch off on its
+	// own ("SSH session", "no display"), so the flow can say so instead of
+	// silently printing a link. Empty when the caller asked (NoBrowser) or
+	// a launch is going to be tried.
+	headlessReason string
+
 	// deviceOptions are appended last to the SDK device-flow options.
 	// Test seam: lets tests inject WithDeviceSleep/WithDeviceClock.
 	deviceOptions []oauth.DeviceOption
@@ -396,14 +786,52 @@ type LoginOptions struct {
 
 // defaults fills in default values for LoginOptions.
 func (o *LoginOptions) defaults() {
-	if !o.Remote && !o.Local && hostutil.IsRemoteSession() {
+	// A host that cannot show a browser (SSH, CI, no display) is a remote
+	// one whatever else was asked: the link is going to be opened on some
+	// other device, so a Launchpad login must take the pasted callback
+	// rather than listen on this host's loopback, which that device could
+	// never reach. --local is the person's word that the browser is right
+	// here and wins over the host heuristics; --no-browser only silences
+	// the launch and must not silence this.
+	hostReason := ""
+	if !o.Local {
+		hostReason = hostutil.HeadlessReason()
+	}
+	autoRemote := !o.Remote && hostReason != ""
+	if autoRemote {
 		o.Remote = true
 	}
-	if o.Remote || config.NonInteractiveEnv() {
+	// The launch is turned off when nobody could see the browser, and the
+	// reason is kept for the transcript when the CLI decided that on its
+	// own: the environment says no one is at this terminal, or the host has
+	// nowhere to open one. A caller who asked (--no-browser, --remote,
+	// --device-code) gets the link without commentary.
+	switch {
+	case o.NoBrowser, o.Remote && !autoRemote:
 		o.NoBrowser = true
+	case config.NonInteractiveEnv():
+		o.NoBrowser, o.headlessReason = true, "BASECAMP_NONINTERACTIVE is set"
+	case autoRemote:
+		o.NoBrowser, o.headlessReason = true, hostReason
 	}
 	if o.BrowserLauncher == nil && !o.NoBrowser {
 		o.BrowserLauncher = openBrowser
+	}
+}
+
+// announceBrowser tries the launch and says what happened in one line. A
+// failed launch is not a failed login — the link is already on screen — so
+// the line points back at it. Explicit --no-browser prints nothing: the
+// person asked for the link alone.
+func (o *LoginOptions) announceBrowser(target string) {
+	switch {
+	case o.headlessReason != "":
+		o.log(fmt.Sprintf("Not opening a browser here (%s). Open the link on any device.", o.headlessReason))
+	case o.NoBrowser || o.BrowserLauncher == nil:
+	case o.BrowserLauncher(target) != nil:
+		o.log("Couldn't open a browser. Open the link above.")
+	default:
+		o.log("Opening your browser… If nothing appears, open the link above.")
 	}
 }
 
@@ -554,6 +982,9 @@ func (m *Manager) loginLaunchpad(ctx context.Context, credKey string, oauthCfg *
 		opts.log("  4. Copy the full URL from your browser's address bar and")
 		opts.log("     paste it below.")
 		opts.log("")
+		// Remote implies NoBrowser, so this never launches: it says why the
+		// CLI chose this flow when the host, not a flag, chose it.
+		opts.announceBrowser(authURL)
 
 		reader := opts.InputReader
 		if reader == nil {
@@ -577,17 +1008,12 @@ func (m *Manager) loginLaunchpad(ctx context.Context, credKey string, oauthCfg *
 		}
 		defer func() { _ = listener.Close() }()
 
-		// Open browser for authentication
-		if opts.BrowserLauncher != nil {
-			if launchErr := opts.BrowserLauncher(authURL); launchErr != nil {
-				opts.log("\nCouldn't open browser automatically.\nOpen this URL in your browser:\n" + authURL + "\n\nWaiting for authentication...")
-			} else {
-				opts.log("\nOpening browser for authentication...")
-				opts.log("If the browser doesn't open, visit: " + authURL + "\n\nWaiting for authentication...")
-			}
-		} else {
-			opts.log("\nOpen this URL in your browser:\n" + authURL + "\n\nWaiting for authentication...")
-		}
+		opts.log("\nSign in to Basecamp\n")
+		opts.log("  Open this link in your browser")
+		opts.log("  " + authURL)
+		opts.log("")
+		opts.announceBrowser(authURL)
+		opts.log("Waiting for you to finish signing in… (times out in 5 minutes)")
 
 		// Wait for OAuth callback with a hard timeout to avoid hanging indefinitely
 		waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -610,12 +1036,7 @@ func (m *Manager) loginLaunchpad(ctx context.Context, credKey string, oauthCfg *
 	creds.TokenEndpoint = oauthCfg.TokenEndpoint
 	creds.Scope = ""
 
-	if opts.Verify != nil {
-		if err := opts.Verify(ctx, creds.AccessToken, oauthTypeLaunchpad); err != nil {
-			return nil, err
-		}
-	}
-	if err := m.store.Save(credKey, creds); err != nil {
+	if err := m.verifyAndStore(ctx, opts, credKey, creds, oauthTypeLaunchpad); err != nil {
 		return nil, err
 	}
 
@@ -676,6 +1097,7 @@ func (m *Manager) loginDevice(ctx context.Context, credKey string, oauthCfg *oau
 	defer cancelDev()
 
 	var displayErr error
+	var wait *approvalWait
 	display := func(devAuth oauth.DeviceAuthorization) {
 		// Validate the raw server-supplied URIs before printing or launching
 		// anything: browser target is the code-embedding URI when valid,
@@ -701,28 +1123,43 @@ func (m *Manager) loginDevice(ctx context.Context, credKey string, oauthCfg *oau
 			return
 		}
 
-		opts.log("\nTo authenticate, open this URL in a browser on any device:")
-		opts.log("  " + shownURI)
-		opts.log("")
-		opts.log("and enter the code: " + userCode)
-		if devAuth.ExpiresIn > 0 {
-			opts.log(fmt.Sprintf("The code expires in %v.", time.Duration(devAuth.ExpiresIn)*time.Second))
+		// Link first, code second, each on its own line so a double-click
+		// or a triple-click copies exactly one of them; the lifetime is
+		// stated where the code is. The warning is RFC 8628 §5.4's remote
+		// phishing defense in one sentence: a code someone else handed over
+		// approves their device, not this one.
+		lifetime := time.Duration(devAuth.ExpiresIn) * time.Second
+		codeStep := "  2. Enter this one-time code when asked"
+		if lifetime > 0 {
+			codeStep += " (expires in " + expiresIn(lifetime) + ")"
 		}
+		opts.log("\nSign in to Basecamp\n")
+		opts.log("  1. Open this link on any device")
+		opts.log("     " + shownURI)
+		opts.log(codeStep)
+		opts.log("     " + userCode)
+		opts.log("")
+		opts.log("Only continue if you started this login yourself. If a website or another")
+		opts.log("person gave you this code, press Ctrl-C now.")
+		opts.log("")
 		// Flag matrix: default/--local launch the browser; --remote,
 		// --device-code, and --no-browser (Remote implies NoBrowser) print
 		// only. defaults() leaves BrowserLauncher nil in headless modes, but
-		// honor NoBrowser too so an injected launcher can't override it.
-		if !opts.NoBrowser && opts.BrowserLauncher != nil {
-			if launchErr := opts.BrowserLauncher(target); launchErr != nil {
-				opts.log("\nCouldn't open browser automatically — use the URL above.")
-			} else {
-				opts.log("\nOpening browser for authentication...")
+		// announceBrowser honors NoBrowser too so an injected launcher can't
+		// override it.
+		opts.announceBrowser(target)
+		if lifetime > 0 {
+			if wait = startApprovalWait(opts.Progress, time.Now().Add(lifetime)); wait != nil {
+				return
 			}
+			opts.log("Waiting for approval… (the code expires in " + expiresIn(lifetime) + ")")
+			return
 		}
-		opts.log("\nWaiting for approval...")
+		opts.log("Waiting for approval…")
 	}
 
 	token, err := oauth.PerformDeviceLogin(devCtx, oauthCfg, bc5ClientID, display, devOpts...)
+	wait.Stop()
 	if displayErr != nil {
 		// The malformed display data — not the cancellation it triggered —
 		// is the real cause.
@@ -744,6 +1181,7 @@ func (m *Manager) loginDevice(ctx context.Context, credKey string, oauthCfg *oau
 		RefreshToken:  token.RefreshToken,
 		OAuthType:     oauthTypeBC5,
 		TokenEndpoint: oauthCfg.TokenEndpoint,
+		Issuer:        oauthCfg.Issuer,
 		Scope:         effectiveScope,
 		// The RFC 8707 account binding: a trusted-client device login mints a
 		// multi-account refresh token, and refreshing one without echoing this
@@ -755,16 +1193,86 @@ func (m *Manager) loginDevice(ctx context.Context, credKey string, oauthCfg *oau
 		creds.ExpiresAt = token.ExpiresAt.Unix()
 	}
 
-	if opts.Verify != nil {
-		if err := opts.Verify(ctx, creds.AccessToken, oauthTypeBC5); err != nil {
-			return nil, err
-		}
-	}
-	if err := m.store.Save(credKey, creds); err != nil {
+	if err := m.verifyAndStore(ctx, opts, credKey, creds, oauthTypeBC5); err != nil {
 		return nil, err
 	}
 
 	return &LoginResult{OAuthType: oauthTypeBC5, Scope: effectiveScope}, nil
+}
+
+// verifyAndStore runs the caller's Verify hook, refuses to let a canceled
+// login reach the store, and persists the credential it proved.
+//
+// The token arrives from the flow after the person may already have
+// pressed Ctrl-C — the poll or exchange can complete in the same instant —
+// and a non-strict verifier answers a canceled request with nil, so
+// without these checks a login the person stopped would still be saved and
+// announced as a success. The LAST check is made under the credential's
+// cross-process lock, because the wait for that lock is itself a window a
+// Ctrl-C can land in: the person stops the login, whoever held the lock
+// releases a moment later, and an unchecked save would store the
+// credential they stopped.
+//
+// A login replaces the whole credential, which is a mutation like any
+// other and has to be exclusive with them. Without the lock a refresh
+// already in flight in another process — loaded before this login started
+// — would save the OLD credential back over the new one a moment later,
+// quietly restoring the identity the person had just replaced.
+func (m *Manager) verifyAndStore(ctx context.Context, opts *LoginOptions, credKey string, creds *Credentials, oauthType string) error {
+	if err := ctx.Err(); err != nil {
+		m.discardGrant(ctx, creds, opts.log)
+		return err
+	}
+	if opts.Verify != nil {
+		if err := opts.Verify(ctx, creds.AccessToken, oauthType); err != nil {
+			m.discardGrant(ctx, creds, opts.log)
+			return err
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	stored := false
+	err := m.store.withKeyLock(ctx, credKey, func() error {
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			return cancelErr
+		}
+		if saveErr := m.store.SaveContext(ctx, credKey, creds); saveErr != nil {
+			return saveErr
+		}
+		m.remember(creds)
+		stored = true
+		return nil
+	})
+	// A grant nothing kept is a grant to hand back, whatever ended the
+	// login: the person's Ctrl-C, or a lock this process could not get.
+	if err != nil && !stored {
+		m.discardGrant(ctx, creds, opts.log)
+	}
+	return err
+}
+
+// storeLoginCredential writes the credential a login just proved, under
+// the manager lock and the credential key's cross-process lock. It is
+// verifyAndStore without the Verify hook, for the agent login, which has
+// no person to verify as and no interactive grant to hand back.
+//
+// The cancellation check is made under the lock for the reason
+// verifyAndStore gives: the wait for it is a window a Ctrl-C can land in.
+func (m *Manager) storeLoginCredential(ctx context.Context, credKey string, creds *Credentials) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.store.withKeyLock(ctx, credKey, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := m.store.SaveContext(ctx, credKey, creds); err != nil {
+			return err
+		}
+		m.remember(creds)
+		return nil
+	})
 }
 
 // validVerificationURL validates a server-supplied verification URI with the
@@ -790,7 +1298,10 @@ func validVerificationURL(raw string) string {
 // the token near expiry with "No refresh token available" rather than
 // letting requests start failing — either way the remedy is to import
 // again. Scope is what the token was verified or declared to carry.
-func (m *Manager) ImportToken(token, scope, userID, userEmail string, expiresAt time.Time) error {
+//
+// ctx bounds the wait for the credential's cross-process lock, so a
+// canceled import stores nothing.
+func (m *Manager) ImportToken(ctx context.Context, token, scope, userID, userEmail string, expiresAt time.Time) error {
 	if scope != scopeRead && scope != scopeFull {
 		return output.ErrUsage("Invalid scope. Use 'read' or 'full'")
 	}
@@ -807,13 +1318,15 @@ func (m *Manager) ImportToken(token, scope, userID, userEmail string, expiresAt 
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.store.Save(m.credentialKey(), creds)
-}
-
-// Logout removes stored credentials.
-func (m *Manager) Logout() error {
 	credKey := m.credentialKey()
-	return m.store.Delete(credKey)
+	// Under the credential's cross-process lock so the import cannot land
+	// in the middle of another process's refresh, which would then save
+	// the credential this one replaced back over it — and under the
+	// caller's context, so a person who stops the import while it waits
+	// for that lock does not get the token stored a moment later anyway.
+	return m.store.withKeyLock(ctx, credKey, func() error {
+		return m.store.SaveContext(ctx, credKey, creds)
+	})
 }
 
 // discovery is the outcome of provider selection: the OAuth config to use
@@ -1010,6 +1523,11 @@ func launchpadClientCredentials(log func(string)) (*ClientCredentials, error) {
 	}, nil
 }
 
+// ClientEnvHint is the remedy for a half-set BASECAMP_OAUTH_CLIENT_ID and
+// BASECAMP_OAUTH_CLIENT_SECRET pair. Logging in reads the same pair and
+// fails the same way, so the login is no remedy; the environment is.
+const ClientEnvHint = "Set both BASECAMP_OAUTH_CLIENT_ID and BASECAMP_OAUTH_CLIENT_SECRET, or unset both to use the built-in client"
+
 // resolveClientCredentials reads OAuth client credentials from environment
 // variables BASECAMP_OAUTH_CLIENT_ID and BASECAMP_OAUTH_CLIENT_SECRET.
 // Both must be set together. Returns nil, nil when neither is set.
@@ -1021,14 +1539,22 @@ func resolveClientCredentials(log func(string)) (*ClientCredentials, error) {
 		return nil, nil
 	}
 	if clientID == "" {
-		return nil, output.ErrAuth("BASECAMP_OAUTH_CLIENT_ID is required when BASECAMP_OAUTH_CLIENT_SECRET is set")
+		return nil, errClientEnv("BASECAMP_OAUTH_CLIENT_ID is required when BASECAMP_OAUTH_CLIENT_SECRET is set")
 	}
 	if clientSecret == "" {
-		return nil, output.ErrAuth("BASECAMP_OAUTH_CLIENT_SECRET is required when BASECAMP_OAUTH_CLIENT_ID is set")
+		return nil, errClientEnv("BASECAMP_OAUTH_CLIENT_SECRET is required when BASECAMP_OAUTH_CLIENT_ID is set")
 	}
 
 	log("Using custom OAuth client credentials from BASECAMP_OAUTH_CLIENT_ID/SECRET")
 	return &ClientCredentials{ClientID: clientID, ClientSecret: clientSecret}, nil
+}
+
+// errClientEnv is an auth_required error whose remedy is the client
+// environment, not a login.
+func errClientEnv(msg string) *output.Error {
+	e := output.ErrAuth(msg)
+	e.Hint = ClientEnvHint
+	return e
 }
 
 // isSecureEndpointURL reports whether u uses a scheme safe for OAuth endpoints
@@ -1066,14 +1592,24 @@ func isSecureEndpointURL(u *url.URL) bool {
 
 // requireSecureOAuthEndpoint parses and validates a server-controlled OAuth
 // endpoint URL with isSecureEndpointURL, returning an auth-class error naming
-// the endpoint when it fails.
+// the endpoint when it fails. The endpoint is echoed with its userinfo
+// masked, and not at all when it does not parse: the error reaches status
+// output and transcripts, and a stored endpoint is exactly where a secret
+// in userinfo would sit.
 func requireSecureOAuthEndpoint(name, endpoint string) error {
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return output.ErrAuth(fmt.Sprintf("invalid %s %q: %v", name, endpoint, err))
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return output.ErrAuth(fmt.Sprintf("invalid %s: %v", name, err))
 	}
 	if !isSecureEndpointURL(u) {
-		return output.ErrAuth(fmt.Sprintf("invalid %s %q: must be an absolute https URL (or http on loopback) with a hostname, no userinfo, and a valid port", name, endpoint))
+		if u.User != nil {
+			u.User = url.User("xxxxx")
+		}
+		return output.ErrAuth(fmt.Sprintf("invalid %s %q: must be an absolute https URL (or http on loopback) with a hostname, no userinfo, and a valid port", name, u.String()))
 	}
 	return nil
 }
@@ -1242,7 +1778,9 @@ func (m *Manager) AuthorizationEndpoint(ctx context.Context) (string, error) {
 	// BASECAMP_TOKEN wins — match AccessToken() precedence (auth.go line 75).
 	if envToken := os.Getenv("BASECAMP_TOKEN"); envToken != "" {
 		if strings.HasPrefix(envToken, bc3TokenPrefix) {
-			return config.NormalizeBaseURL(m.cfg.BaseURL) + "/authorization.json", nil
+			// The same origin-level document a stored BC5 credential asks
+			// for: a pathful base URL must not turn it into /api/v1/...
+			return m.AuthorizationEndpointFor(oauthTypeBC5)
 		}
 		lpURL, err := m.launchpadURL()
 		if err != nil {
@@ -1258,7 +1796,11 @@ func (m *Manager) AuthorizationEndpoint(ctx context.Context) (string, error) {
 // credential of the given OAuth type, whether or not it is stored yet.
 func (m *Manager) AuthorizationEndpointFor(oauthType string) (string, error) {
 	switch oauthType {
-	case "bc3", oauthTypeBC5:
+	case "bc3", oauthTypeBC5, oauthTypeAgent:
+		// An agent self-token is minted by Basecamp's own authorization
+		// server, so it asks the same origin-level document a bc5
+		// credential does.
+		//
 		// resourceOrigin, not NormalizeBaseURL: the latter only trims a
 		// trailing slash, so a pathful BaseURL (https://host/api/v1 —
 		// explicitly supported by resourceOrigin) would yield a misrouted
@@ -1290,6 +1832,7 @@ func (m *Manager) GetOAuthType() string {
 	if err != nil {
 		return ""
 	}
+	m.remember(creds)
 	return creds.OAuthType
 }
 
@@ -1321,6 +1864,7 @@ func (m *Manager) AccountID() string {
 	if err != nil {
 		return ""
 	}
+	m.remember(creds)
 
 	id := strings.TrimPrefix(creds.Resource, accountResourceURNPrefix)
 	if id == creds.Resource || id == "" {
@@ -1344,6 +1888,7 @@ func (m *Manager) GetUserEmail() string {
 	if err != nil {
 		return ""
 	}
+	m.remember(creds)
 	return creds.UserEmail
 }
 
@@ -1355,30 +1900,64 @@ func (m *Manager) GetUserEmail() string {
 // whoever the stored credentials belong to; writing it there would
 // mislabel them. Skipping the store also keeps a token session off the
 // keyring probe and the fallback warning it can raise.
-func (m *Manager) SetUserEmail(email string) error {
-	if os.Getenv("BASECAMP_TOKEN") != "" {
+//
+// An empty email is an omission, not a value: an in-house (bc3) token's
+// authorization document carries only the identity id, and a caller
+// relaying that must not blank what a login stored.
+func (m *Manager) SetUserEmail(ctx context.Context, email string) error {
+	if os.Getenv("BASECAMP_TOKEN") != "" || email == "" {
 		return nil
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	credKey := m.credentialKey()
-	creds, err := m.store.Load(credKey)
-	if err != nil {
-		return err
-	}
-	creds.UserEmail = email
-	return m.store.Save(credKey, creds)
+	// Load and save are one read-modify-write, so they are taken under the
+	// credential's cross-process lock: without it this write would put the
+	// whole credential back as it was read, undoing a token another process
+	// rotated in between.
+	//
+	// Under the caller's context too. This is a best-effort writeback its
+	// callers do not even check, so it must not be able to hold a finished
+	// or canceled command for the length of another process's refresh.
+	return m.store.withKeyLock(ctx, credKey, func() error {
+		creds, err := m.store.LoadContext(ctx, credKey)
+		if err != nil {
+			return err
+		}
+		creds.UserEmail = email
+		return m.store.SaveContext(ctx, credKey, creds)
+	})
 }
 
-// SetUserIdentity stores the user ID and email for the current credential key.
-func (m *Manager) SetUserIdentity(userID, email string) error {
-	credKey := m.credentialKey()
-	creds, err := m.store.Load(credKey)
-	if err != nil {
-		return err
+// SetUserIdentity stores the user ID and email for the current credential
+// key. As with SetUserEmail, an empty value leaves the stored field alone.
+// Unlike it, BASECAMP_TOKEN does not suppress the write: a login stores
+// its new credential and then records who it verified as, whatever the
+// environment holds, so the caller decides whose identity this is.
+func (m *Manager) SetUserIdentity(ctx context.Context, userID, email string) error {
+	if userID == "" && email == "" {
+		return nil
 	}
-	creds.UserID = userID
-	creds.UserEmail = email
-	return m.store.Save(credKey, creds)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	credKey := m.credentialKey()
+	// One read-modify-write, under the credential's cross-process lock and
+	// the caller's context, for the reasons SetUserEmail gives.
+	return m.store.withKeyLock(ctx, credKey, func() error {
+		creds, err := m.store.LoadContext(ctx, credKey)
+		if err != nil {
+			return err
+		}
+		if userID != "" {
+			creds.UserID = userID
+		}
+		if email != "" {
+			creds.UserEmail = email
+		}
+		return m.store.SaveContext(ctx, credKey, creds)
+	})
 }
 
 // CredentialKey returns the current credential storage key.
@@ -1396,4 +1975,10 @@ func (m *Manager) GetStore() *Store {
 // a file-backed store rooted in a temp directory.
 func (m *Manager) SetStore(s *Store) {
 	m.store = s
+}
+
+// SetClock sets the time a remembered mint verdict is read and written
+// against, for a caller that drives time itself; nil means time.Now.
+func (m *Manager) SetClock(clock func() time.Time) {
+	m.clock = clock
 }

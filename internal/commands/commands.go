@@ -36,6 +36,7 @@ func CommandCategories() []CommandCategory {
 			Commands: []CommandInfo{
 				{Name: "projects", Category: "core", Description: "Manage projects", Actions: []string{"list", "show", "create", "update", "delete"}},
 				{Name: "todos", Category: "core", Description: "Manage to-dos", Actions: []string{"list", "show", "create", "update", "complete", "uncomplete", "position", "trash", "archive", "restore"}},
+				{Name: "subtasks", Category: "core", Description: "Manage subtasks on to-dos and cards", Actions: []string{"list", "show", "create", "update", "complete", "uncomplete", "move", "delete"}},
 				{Name: "todolists", Category: "core", Description: "Manage to-do lists", Actions: []string{"list", "show", "create", "update", "position", "trash", "archive", "restore"}},
 				{Name: "todosets", Category: "core", Description: "Manage to-do set containers", Actions: []string{"list", "show"}},
 				{Name: "hillcharts", Category: "core", Description: "Manage hill charts", Actions: []string{"show", "track", "untrack"}},
@@ -105,6 +106,7 @@ func CommandCategories() []CommandCategory {
 				{Name: "comments", Category: "communication", Description: "Manage comments", Actions: []string{"create", "list", "show", "thread", "update", "trash", "archive", "restore"}},
 				{Name: "boost", Category: "communication", Description: "Manage boosts (reactions)", Actions: []string{"list", "show", "create", "delete"}},
 				{Name: "notifications", Category: "communication", Description: "View and manage notifications", Actions: []string{"list", "read", "bubbleups"}},
+				{Name: "inbox", Category: "communication", Description: "Poll addressed items from the account event feed (agents only)"},
 			},
 		},
 		{
@@ -113,7 +115,7 @@ func CommandCategories() []CommandCategory {
 				{Name: "search", Category: "search", Description: "Search across projects"},
 				{Name: "recordings", Category: "search", Description: "Browse content by type across projects", Actions: []string{"list", "trash", "archive", "restore", "visibility"}},
 				{Name: "show", Category: "search", Description: "Show any item by ID"},
-				{Name: "events", Category: "search", Description: "View change history"},
+				{Name: "events", Category: "search", Description: "View change history and poll the account event feed", Actions: []string{"poll", "ticket"}},
 				{Name: "url", Category: "search", Description: "Parse Basecamp URLs"},
 			},
 		},
@@ -121,9 +123,9 @@ func CommandCategories() []CommandCategory {
 			Name: "Auth & Config",
 			Commands: []CommandInfo{
 				{Name: "accounts", Category: "auth", Description: "Manage accounts", Actions: []string{"list", "use", "show", "update", "logo"}},
-				{Name: "auth", Category: "auth", Description: "Authenticate with Basecamp", Actions: []string{"login", "logout", "status", "refresh"}},
+				{Name: "auth", Category: "auth", Description: "Authenticate with Basecamp", Actions: []string{"login", "logout", "revoke", "status", "refresh", "agent"}},
 				{Name: "login", Category: "auth", Description: "Authenticate with Basecamp"},
-				{Name: "logout", Category: "auth", Description: "Remove stored credentials"},
+				{Name: "logout", Category: "auth", Description: "Log out and revoke the credential"},
 				{Name: "config", Category: "auth", Description: "Manage configuration", Actions: []string{"show", "init", "set", "unset", "project", "trust", "untrust"}},
 				{Name: "me", Category: "auth", Description: "Show current user profile"},
 				{Name: "setup", Category: "auth", Description: "First-time setup with recommended defaults"},
