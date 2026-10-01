@@ -353,7 +353,18 @@ func authStatusReport(ctx context.Context, app *appctx.App) (*authStatus, error)
 	// Asking what a renewal would do also tells the manager what this
 	// credential IS, so every remedy from here names the right login.
 	refusal := app.Auth.RefreshRefusal(creds)
-	refreshable := refusal == nil
+	// The report says what a renewal sent now would meet. A stored hold
+	// that ends on its own — a rate limit, a refusal rechecked hourly —
+	// leaves the credential refreshable once it ends; only a permanent
+	// one does not. renewal_refused is the stored hold and nothing else:
+	// a credential that cannot mint for a local reason has no hold.
+	hold := app.Auth.MintHoldStatus(creds, refusal)
+	timeLimited := hold != nil && !hold.Permanent()
+	refreshable := refusal == nil || timeLimited
+
+	if hold != nil {
+		report.data["renewal_refused"] = hold
+	}
 
 	if creds.AccessToken == "" {
 		report.data["authenticated"] = false
@@ -361,6 +372,9 @@ func authStatusReport(ctx context.Context, app *appctx.App) (*authStatus, error)
 		report.data["refreshable"] = refreshable
 		report.summary = "Not logged in to " + baseURL
 		report.hint = app.Auth.LoginHint()
+		if timeLimited {
+			report.hint = hold.Hint
+		}
 		return report, nil
 	}
 
@@ -424,17 +438,33 @@ func authStatusReport(ctx context.Context, app *appctx.App) (*authStatus, error)
 		report.data["expires_at"] = expiresAt.UTC().Format(time.RFC3339)
 		report.data["expires_in"] = expiresIn.Round(time.Second).String()
 		report.data["expired"] = expired
+		held := ""
+		if timeLimited {
+			held = " (" + hold.Message + ")"
+			report.hint = hold.Hint
+		}
 		switch {
 		case !expired && refreshable:
-			expiry = "expires in " + coarseDuration(expiresIn) + ", refreshes automatically"
+			expiry = "expires in " + coarseDuration(expiresIn) + ", refreshes automatically" + held
 			report.refreshPromise, report.refreshFailed = expiry, "expires in "+coarseDuration(expiresIn)+", and the refresh failed"
+		case !expired && hold != nil:
+			// A stored hold that never ends: the next renewal will be
+			// refused, and the line says so before the token runs out.
+			expiry = "expires in " + coarseDuration(expiresIn) + "; renewal would be refused: " + hold.Detail + "; log in with a new secret"
+			report.hint = remedyFor(app, refusal)
 		case !expired:
 			expiry = "expires in " + coarseDuration(expiresIn)
 		case refreshable:
-			expiry = "expired, will refresh on next use"
+			expiry = "expired, will refresh on next use" + held
 			report.refreshPromise, report.refreshFailed = expiry, "expired, and the refresh failed"
 		case expiresIn >= 0:
 			expiry = "expired (" + coarseDuration(expiresIn) + " left, inside the " + coarseDuration(auth.RefreshWindow) + " the CLI keeps clear of expiry, and the refresh would be refused: " + output.AsError(refusal).Message + ")"
+			report.hint = remedyFor(app, refusal)
+		case creds.OAuthType == "agent":
+			// An agent's renewal can be refused by a verdict the token
+			// endpoint already gave — a secret it refused — and that says
+			// why, where "expired" alone would not.
+			expiry = "expired, and the renewal would be refused: " + output.AsError(refusal).Message
 			report.hint = remedyFor(app, refusal)
 		default:
 			expiry = "expired"
