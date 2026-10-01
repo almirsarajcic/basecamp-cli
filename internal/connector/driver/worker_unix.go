@@ -3,7 +3,9 @@
 package driver
 
 import (
+	"errors"
 	"os/exec"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -28,7 +30,21 @@ func signalGroup(pgid int, sig syscall.Signal) error {
 	if pgid <= 1 || pgid == syscall.Getpgrp() {
 		return syscall.EINVAL
 	}
-	return syscall.Kill(-pgid, sig)
+	err := syscall.Kill(-pgid, sig)
+	// macOS only: Linux delivers a signal to a zombie-only group, so EPERM
+	// there is a group this process may not signal — and with /proc mounted
+	// hidepid, its listing cannot see that group's members to say otherwise.
+	if runtime.GOOS == "darwin" && errors.Is(err, syscall.EPERM) {
+		// macOS refuses any signal to a group whose only members are
+		// zombies, where Linux delivers it; nothing in such a group runs.
+		// When the kernel's own listing says so, it is the absent group it
+		// is everywhere else. A group that runs but may not be signaled
+		// (another user's) still lists its members, and keeps the refusal.
+		if running, listErr := groupRunning(pgid); listErr == nil && !running {
+			return syscall.ESRCH
+		}
+	}
+	return err
 }
 
 // probeGroup is a probe run as the leader of a group of its own.

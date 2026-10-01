@@ -302,10 +302,13 @@ func TestTheShortSocketBaseIsChosenSoTheSocketFits(t *testing.T) {
 // an empty taker for a token that was in fact handed over.
 func TestAHandoffInFlightIsFinishedBeforeTheTakerIsRead(t *testing.T) {
 	// The identity lookup is where the handoff is slowest; hold it there.
-	slow := make(chan struct{})
+	// It runs before the write (Copilot on #812), so the peer is connected
+	// and waiting for its token.
+	reached, slow := make(chan struct{}), make(chan struct{})
 	s, err := serveTaskTokenWith(tokenDir(t), socketTestToken, 2*time.Second,
 		peerCredentials, processGroupOf, parentProcessOf,
 		func(pid int) (driver.Process, error) {
+			close(reached)
 			<-slow
 			return driver.LookupProcess(pid)
 		})
@@ -318,7 +321,7 @@ func TestAHandoffInFlightIsFinishedBeforeTheTakerIsRead(t *testing.T) {
 		token, _ := fetch(t, s.Path())
 		got <- token
 	}()
-	require.Equal(t, socketTestToken, strings.TrimSpace(<-got), "the token is out before the taker is known")
+	<-reached
 	_, ok := s.Taker()
 	require.False(t, ok, "the fixture must have the handoff still deciding")
 
@@ -330,6 +333,7 @@ func TestAHandoffInFlightIsFinishedBeforeTheTakerIsRead(t *testing.T) {
 	require.True(t, ok, "and the process that took the token is known by then")
 	assert.Equal(t, os.Getpid(), taker.PID)
 	assert.Equal(t, HandoffDelivered, s.Result())
+	assert.Equal(t, socketTestToken, strings.TrimSpace(<-got), "the handoff in flight still delivered")
 }
 
 // Opus r8: after a delivery the socket does not arm again while the process
@@ -525,4 +529,64 @@ func TestAHandoffStillInFlightAtTheReleasePointHoldsTheAttempt(t *testing.T) {
 
 	holder := settledTaker(s, slog.New(slog.DiscardHandler), "att", 50*time.Millisecond)
 	assert.True(t, holder.Held(), "an attempt is not released around a handoff that is still deciding")
+}
+
+// macOS names a peer's process only while it is connected: a peer of this
+// user's that closed first is not a refusal (nothing untrusted asked) and is
+// handed nothing; the socket waits for the next start. Another user's is
+// still refused.
+func TestAPeerGoneBeforeItIsNamedIsUndeliveredNotRefused(t *testing.T) {
+	for uid, want := range map[int]Handoff{os.Getuid(): HandoffUndelivered, os.Getuid() + 1: HandoffRefused} {
+		gone := func(*net.UnixConn) (PeerCredentials, error) { return PeerCredentials{UID: uid}, errPeerGone }
+		s, err := serveTaskTokenWith(tokenDir(t), socketTestToken, 5*time.Second, gone,
+			processGroupOf, parentProcessOf, driver.LookupProcess)
+		require.NoError(t, err)
+		handoffs := make(chan Handoff, 4)
+		s.OnHandoff(func(h Handoff, _ driver.Process, _ bool) { handoffs <- h })
+		s.AllowGroup(syscall.Getpgrp())
+
+		dialer := net.Dialer{Timeout: 2 * time.Second}
+		conn, err := dialer.DialContext(context.Background(), "unix", s.Path())
+		require.NoError(t, err)
+		got, err := io.ReadAll(conn)
+		require.NoError(t, err)
+		_ = conn.Close()
+		assert.Empty(t, got, "no token for a peer that could not be named")
+		assert.Equal(t, want, <-handoffs, "uid %d", uid)
+		s.Close()
+	}
+}
+
+// The process that took the token is the one the trust check named before
+// the write. A server that reads its token and closes at once is the
+// ordinary case, and macOS will not name a peer that has closed: asking a
+// second time would lose the taker, and hold the attempt over a delivery that
+// worked.
+func TestTheTakerIsThePeerNamedBeforeTheWrite(t *testing.T) {
+	var calls atomic.Int32
+	namedOnce := func(*net.UnixConn) (PeerCredentials, error) {
+		if calls.Add(1) > 1 {
+			return PeerCredentials{UID: os.Getuid()}, errPeerGone
+		}
+		return PeerCredentials{PID: os.Getpid(), UID: os.Getuid()}, nil
+	}
+	s, err := serveTaskTokenWith(tokenDir(t), socketTestToken, 5*time.Second, namedOnce,
+		processGroupOf, parentProcessOf, driver.LookupProcess)
+	require.NoError(t, err)
+	defer s.Close()
+	type handed struct {
+		h     Handoff
+		taker driver.Process
+	}
+	handoffs := make(chan handed, 2)
+	s.OnHandoff(func(h Handoff, taker driver.Process, _ bool) { handoffs <- handed{h, taker} })
+	s.AllowGroup(syscall.Getpgrp())
+
+	got, err := fetch(t, s.Path())
+	require.NoError(t, err)
+	assert.Equal(t, socketTestToken, strings.TrimSpace(got))
+	first := <-handoffs
+	assert.Equal(t, HandoffDelivered, first.h)
+	assert.Equal(t, os.Getpid(), first.taker.PID, "the taker is the peer the trust check named")
+	assert.Equal(t, int32(1), calls.Load(), "the peer is asked once")
 }
