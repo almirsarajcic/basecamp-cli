@@ -275,6 +275,9 @@ type connectSetupFlags struct {
 	worker   string
 	parallel int
 	deadline time.Duration
+	// dangerous is --dangerous; only what the command line said counts, so
+	// it is read with Changed.
+	dangerous bool
 
 	// guided is the guided setup running this one: a setup that passes says
 	// so in a line, since the guided summary names the agent, its owner and
@@ -387,6 +390,7 @@ Examples:
 	fl.StringArrayVar(&f.watch, "watch-completions", nil, "Admit every trusted completion in a served project (repeatable)")
 	fl.StringArrayVar(&f.unwatch, "no-watch-completions", nil, "Stop watching a project's completions (repeatable)")
 	fl.StringVar(&f.driver, "driver", "", "How workers are run: spawn or acp (default spawn)")
+	fl.BoolVar(&f.dangerous, "dangerous", false, "Let the agent run any command on this computer, as you (asks you to type yes; only while you alone can give it work). --dangerous=false turns it off")
 	fl.StringVar(&f.worker, "worker", "", fmt.Sprintf("The coding agent workers run: %s (default %s)", strings.Join(setup.Workers, ", "), setup.DefaultWorker))
 	fl.IntVar(&f.parallel, "concurrency", 0, fmt.Sprintf("Workers at once (default %d)", setup.DefaultConcurrency))
 	fl.DurationVar(&f.deadline, "deadline", 0, fmt.Sprintf("Deadline per task (default %s)", setup.DefaultDeadline))
@@ -405,10 +409,6 @@ func runConnectSetup(cmd *cobra.Command, app *appctx.App, f *connectSetupFlags) 
 	if !isValidProfileName(name) {
 		return output.ErrUsage(fmt.Sprintf("Invalid profile name %q: use only letters, numbers, hyphens, and underscores", name))
 	}
-	if os.Getenv("BASECAMP_TOKEN") != "" {
-		return errEnvTokenShadows("connect setup cannot check the agent while BASECAMP_TOKEN is set")
-	}
-
 	changes, err := f.changes(cmd)
 	if err != nil {
 		return err
@@ -450,6 +450,15 @@ func runConnectSetup(cmd *cobra.Command, app *appctx.App, f *connectSetupFlags) 
 	if existing.Profile != name {
 		return output.ErrUsage(fmt.Sprintf("%s names profile %q, not %q", path, existing.Profile, name))
 	}
+	// Turning dangerous mode off on its own is the off switch: saved here,
+	// with nothing asked of Basecamp, so it works offline or with a
+	// credential Basecamp no longer takes.
+	if exists && dangerousOffOnly(cmd) {
+		return turnDangerousModeOff(cmd, app, name, path, existing)
+	}
+	if os.Getenv("BASECAMP_TOKEN") != "" {
+		return errEnvTokenShadows("connect setup cannot check the agent while BASECAMP_TOKEN is set")
+	}
 	// Guided setup makes connect.json only where there was none. One written
 	// while it was asking is another setup's, and its trust may not be what
 	// guided setup told the person: it is left as it is.
@@ -461,7 +470,12 @@ func runConnectSetup(cmd *cobra.Command, app *appctx.App, f *connectSetupFlags) 
 	// Everything refusable without the network is refused first.
 	next, err := setup.Apply(existing, changes)
 	if err != nil {
-		return output.ErrUsage(err.Error())
+		return refusedChange(cmd.ErrOrStderr(), name, err)
+	}
+	if next.Dangerous && !existing.Dangerous {
+		if err := confirmDangerous(cmd.OutOrStdout(), app, name); err != nil {
+			return err
+		}
 	}
 	// With no operator named or recorded, a personal agent's operator is the
 	// person it works for, which Basecamp says in the agent's own profile.
@@ -603,6 +617,9 @@ func runConnectSetup(cmd *cobra.Command, app *appctx.App, f *connectSetupFlags) 
 		next.Agent.IdentityID = expect
 	}
 	next.Trust.OperatorID = trust.Operator.ID
+	if err := setup.CheckDangerousOperator(existing, next); err != nil {
+		return refusedChange(cmd.ErrOrStderr(), name, err)
+	}
 	if err := next.Validate(); err != nil {
 		return output.ErrUsage("connect.json was not written: " + err.Error())
 	}
@@ -623,6 +640,9 @@ func runConnectSetup(cmd *cobra.Command, app *appctx.App, f *connectSetupFlags) 
 	report.Add(setup.TicketCheck(ctx, reader, kind))
 	report.Add(setup.ProjectChecks(ctx, reader, next, !exists)...)
 	report.Add(workFolderCheck())
+	if next.Dangerous {
+		report.Add(dangerousModeCheck(name))
+	}
 	// A command the person stopped did not find the connector unready: it
 	// found nothing, and says so as an interruption.
 	if err := ctx.Err(); err != nil {
@@ -660,6 +680,7 @@ func runConnectSetup(cmd *cobra.Command, app *appctx.App, f *connectSetupFlags) 
 		return classifyWriteError(name, saveErr)
 	}
 	report.Written = true
+	noteDangerousChange(cmd.ErrOrStderr(), existing, next, name)
 
 	summary := summarizeChecks(asDoctorChecks(report.Checks()))
 	if !report.Ready() {
@@ -866,6 +887,10 @@ func (f *connectSetupFlags) changes(cmd *cobra.Command) (setup.Changes, error) {
 		return ch, output.ErrUsage(fmt.Sprintf("Invalid --worker %q: use %s", f.worker, strings.Join(setup.Workers, ", ")))
 	}
 	ch.Worker = f.worker
+	if cmd.Flags().Changed("dangerous") {
+		on := f.dangerous
+		ch.Dangerous = &on
+	}
 	// A typed zero is out of range, not a request for the default: the flags
 	// are read as typed, not as their zero values.
 	if cmd.Flags().Changed("concurrency") {

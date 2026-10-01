@@ -274,6 +274,7 @@ record's recording URL is shown so a person can open what was asked.`,
 type connectStatusReport struct {
 	Profile    string             `json:"profile"`
 	Shadow     bool               `json:"shadow"`
+	Dangerous  bool               `json:"dangerous,omitempty"`
 	LockHolder *connectLockHolder `json:"lock_holder,omitempty"`
 	Status     connector.Status   `json:"status"`
 }
@@ -319,7 +320,7 @@ func runConnectStatus(cmd *cobra.Command, shadow bool) error {
 		status.Tasks[i].Worker = recordedWorkerState(t)
 		status.Tasks[i].Taker = recordedTakerState(t)
 	}
-	report := connectStatusReport{Profile: p.name, Shadow: shadow, Status: status}
+	report := connectStatusReport{Profile: p.name, Shadow: shadow, Dangerous: p.file.Dangerous && !shadow, Status: status}
 	if holder, ok := connector.InstanceHolder(dir, p.file.AccountID, p.file.Agent.PersonID); ok {
 		report.LockHolder = &connectLockHolder{PID: holder.PID, StartedAt: holder.StartedAt, PIDStatus: processPresence(holder.PID)}
 	}
@@ -339,8 +340,33 @@ func notTakingWork(s connector.Status) (string, bool) {
 	return s.Connection.Detail, true
 }
 
+// dangerousUnused is why a running connector isn't using the dangerous mode
+// connect.json has on, or "" when it is (or none runs).
+func (r connectStatusReport) dangerousUnused() string {
+	c := r.Status.Connection
+	if !r.Dangerous || c == nil || c.State != connector.ConnectionRunning {
+		return ""
+	}
+	switch c.Detail {
+	case dangerousOnThisRun:
+		return ""
+	case dangerousOffThisRun:
+		return "requests from other people were still waiting when it started. Restart it once they're done"
+	default:
+		return "it was started before dangerous mode was turned on. Restart it for dangerous mode to take effect"
+	}
+}
+
 func connectStatusSummary(r connectStatusReport) string {
 	parts := []string{}
+	switch {
+	case r.Dangerous && r.Status.Connection != nil && r.Status.Connection.Detail == dangerousOffThisRun:
+		parts = append(parts, "dangerous mode on but not in use until a restart after other people's waiting requests finish")
+	case r.Dangerous && r.dangerousUnused() != "":
+		parts = append(parts, "dangerous mode on but not in use until a restart")
+	case r.Dangerous:
+		parts = append(parts, "dangerous mode on")
+	}
 	if _, ok := notTakingWork(r.Status); ok {
 		parts = append(parts, "not taking work")
 	}
@@ -368,6 +394,12 @@ func renderConnectStatus(w io.Writer, r connectStatusReport) {
 	fmt.Fprintf(w, "%s\n\n", title)
 	if why, ok := notTakingWork(s); ok {
 		fmt.Fprintf(w, "  Not taking work: %s. %s\n\n", clean(why), connector.NotTakingWorkFix)
+	}
+	switch {
+	case r.dangerousUnused() != "":
+		fmt.Fprintf(w, "  Dangerous mode is on in connect.json, but the running connector isn't using it: %s.\n\n", r.dangerousUnused())
+	case r.Dangerous:
+		fmt.Fprintf(w, "  Dangerous mode is on: the agent can run any command on this computer, as you. Turn it off: basecamp connect setup -P %s --dangerous=false\n\n", richtext.ShellQuote(r.name()))
 	}
 	if s.Connection != nil && s.Connection.State == connector.ConnectionDisconnected {
 		fmt.Fprintf(w, "  Disconnected: %s. Reconnect it: basecamp connect setup -P %s\n\n", clean(s.Connection.Detail), richtext.ShellQuote(r.name()))

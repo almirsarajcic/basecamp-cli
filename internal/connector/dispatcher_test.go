@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1674,4 +1675,38 @@ func TestAnUnreadableConfigClaimsNoWaitingWorkOnAnEmptyLedger(t *testing.T) {
 	h.run(t)
 	time.Sleep(200 * time.Millisecond)
 	assert.NotContains(t, logged.String(), "work is waiting", "there is none, and nothing counted")
+}
+
+// A worker started in dangerous mode is handed nothing more once the owner
+// turns it off: a follow-up on its conversation waits, unjoined, so it is not
+// one get_dispatch away mid-turn, and runs in a worker of its own without
+// dangerous mode (Codex on the dangerous-mode review).
+func TestAFollowUpDoesNotReachADangerousWorkerOnceItIsTurnedOff(t *testing.T) {
+	fake := newFakeDriver()
+	release := make(chan struct{})
+	var once sync.Once
+	fake.turn = func(*fakeSession, int, string) (driver.PromptResult, error) {
+		once.Do(func() { <-release })
+		return driver.PromptResult{Stop: driver.TurnEndTurn}, nil
+	}
+	var dangerous atomic.Bool
+	dangerous.Store(true)
+	h := newDispatchHarness(t, fake, func(o *DispatcherOptions) {
+		o.Policy = func() driver.PermissionPolicy { return PolicyFor(dangerous.Load()) }
+	})
+	admitOn(t, h.ledger, 1, "recording:1")
+	h.run(t)
+	first := nextSession(t, fake)
+	require.Equal(t, driver.ModeAnything, first.cfg.Policy.Rules().Mode)
+
+	dangerous.Store(false)
+	admitOn(t, h.ledger, 2, "recording:1")
+	time.Sleep(150 * time.Millisecond)
+	assert.Equal(t, StateQueued, getRecord(t, h.ledger, 2).State, "not joined to the dangerous worker's task mid-turn")
+	close(release)
+	h.attemptsEnded(t, 1)
+	assert.Len(t, first.promptList(), 1, "the dangerous worker got nothing more")
+
+	second := nextSession(t, fake)
+	assert.Equal(t, driver.ModeEdits, second.cfg.Policy.Rules().Mode, "the follow-up ran without dangerous mode")
 }

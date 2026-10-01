@@ -31,6 +31,8 @@ type Changes struct {
 	Remove []int64
 
 	Driver string
+	// Dangerous turns dangerous mode on or off; nil keeps the file's.
+	Dangerous *bool
 	// Worker is the coding agent, "" to keep the file's.
 	Worker      string
 	Concurrency int
@@ -103,7 +105,29 @@ func Apply(f File, ch Changes) (File, error) {
 	if ch.Deadline != 0 {
 		out.Deadline = Duration(ch.Deadline)
 	}
+	if ch.Dangerous != nil {
+		out.Dangerous = *ch.Dangerous
+	}
+	// Dangerous mode and trusting others are refused together whichever of
+	// the two this run asked for, with what to do about it.
+	if out.Dangerous && out.Trust.Mode != admission.TrustOperator {
+		if f.Dangerous && ch.Dangerous == nil {
+			return File{}, ErrDangerousWhileShared
+		}
+		return File{}, ErrDangerousShared
+	}
 	return out, nil
+}
+
+// CheckDangerousOperator refuses a new operator while dangerous mode is on:
+// the person whose requests run with a shell would change without anyone
+// having turned it on for them. A first setup, with no operator yet, is not a
+// change. Setup calls it once the operator is resolved.
+func CheckDangerousOperator(before, after File) error {
+	if before.Dangerous && after.Dangerous && before.Trust.OperatorID != 0 && after.Trust.OperatorID != before.Trust.OperatorID {
+		return ErrDangerousOperatorChange
+	}
+	return nil
 }
 
 func applyTrust(t *admission.Trust, ch Changes) error {

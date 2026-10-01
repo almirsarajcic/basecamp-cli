@@ -46,7 +46,7 @@ const connectAgentProfileName = "agent"
 var connectSetupPolicyFlags = []string{
 	"expect-identity", "operator", "operator-profile", "trust", "allow",
 	"serve", "unserve", "class", "watch-completions", "no-watch-completions",
-	"driver", "worker", "concurrency", "deadline",
+	"driver", "worker", "concurrency", "deadline", "dangerous",
 }
 
 // connectSetupInteractive reports whether a person is at the terminal to
@@ -671,6 +671,9 @@ func renderGuidedSummary(w io.Writer, r *output.Renderer, agent guidedAgent, fil
 	if agent.HasOwner {
 		fmt.Fprintf(w, "  Works for: %s\n", richtext.SanitizeSingleLine(agent.Owner.Name))
 	}
+	if file.Dangerous {
+		fmt.Fprintln(w, "  Dangerous: on — it can run any command on this computer, as you, without asking")
+	}
 	if len(served) == 0 {
 		// Every project was taken out of connect.json: a mention anywhere
 		// gets a holding reply, so there is nowhere to try it.
@@ -690,7 +693,11 @@ func renderGuidedSummary(w io.Writer, r *output.Renderer, agent guidedAgent, fil
 		fmt.Fprintln(w, "  Running:   no")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "To start it, run this in the folder it should work in, and leave it running.")
-		fmt.Fprintln(w, "It can change files in that folder without asking.")
+		if file.Dangerous {
+			fmt.Fprintln(w, "It can run any command on this computer without asking, starting in that folder.")
+		} else {
+			fmt.Fprintln(w, "It can change files in that folder without asking.")
+		}
 		fmt.Fprintln(w, "  basecamp connect -P "+richtext.ShellQuote(name))
 		fmt.Fprintf(w, "\nOnce it's running, mention %s in one of those projects to try it.\n", agentName)
 	}
