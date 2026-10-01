@@ -321,7 +321,21 @@ func TestCardsStepMoveRequiresPosition(t *testing.T) {
 
 	var e *output.Error
 	if assert.True(t, errors.As(err, &e), "expected *output.Error, got %T: %v", err, err) {
-		assert.Equal(t, "--position is required (0-indexed)", e.Message)
+		assert.Equal(t, "--position is required (1-based)", e.Message)
+	}
+}
+
+// A --position that was given but is below 1 says so, rather than calling it missing.
+func TestCardsStepMoveRejectsPositionZero(t *testing.T) {
+	app, _ := setupTestApp(t)
+	app.Config.ProjectID = "123"
+
+	err := executeCommand(newCardsStepMoveCmd(), app, "456", "--card", "789", "--position", "0")
+	require.NotNil(t, err, "expected error, got nil")
+
+	var e *output.Error
+	if assert.True(t, errors.As(err, &e), "expected *output.Error, got %T: %v", err, err) {
+		assert.Equal(t, "--position must be 1 or more (1 = top)", e.Message)
 	}
 }
 
