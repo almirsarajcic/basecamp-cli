@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -170,17 +169,43 @@ func runConnect(cmd *cobra.Command, f *connectRunFlags) error {
 	if err != nil {
 		return output.ErrAuth("The stored credential could not be read: " + setup.ErrorText(err))
 	}
+	// A look at the lock first, under the agent connect.json names: a
+	// second connector for an agent already running says so now, not after
+	// waiting out a rate limit for a token it would never use. Only a look:
+	// until the credential is proven to be that agent, holding its lock
+	// through the wait could keep the agent's real connector from starting.
+	// The lock is taken for the run once the identity is verified.
+	stateDir, err := connectStateDir(file, f.shadow)
+	if err != nil {
+		return output.ErrUsage("The connector's state directory cannot be used: " + err.Error())
+	}
+	if err := connectLockFree(stateDir, account, file.Agent.PersonID); err != nil {
+		return err
+	}
+
+	logger := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
 	tokens := &managerTokens{mgr: app.Auth}
+	// Every read below needs a token first. One the running feed would
+	// wait for is waited for here too, rather than ending the start.
+	startSignals, stopStartSignals := connector.NotifyShutdown()
+	err = awaitConnectToken(ctx, tokens, connectStartWait{Log: func(line string) { logger.Warn(line) }, Signals: startSignals})
+	stopStartSignals()
+	select {
+	case sig, ok := <-startSignals:
+		// Delivered after the wait had finished, before the stop took.
+		if ok {
+			return connectStoppedBySignal(sig)
+		}
+	default:
+	}
+	if err != nil {
+		return connectStartFailure(ctx, kind, name, err)
+	}
 	client := connectSDKClient(app, tokens)
 	accountClient := client.ForAccount(account)
 	me, err := (setup.SDKReader{Client: accountClient}).Me(ctx)
-	if agentDisconnectedAtStart(kind, err) {
-		// Disconnected while the connector wasn't running: said the way a
-		// running connector says it, with no name, since reading it failed.
-		return errAgentDisconnected("", name)
-	}
 	if err != nil {
-		return output.ErrAuth(fmt.Sprintf("Could not read who profile %q is: %s", name, setup.ErrorText(err)))
+		return connectStartFailure(ctx, kind, name, err)
 	}
 	if _, err := checkConnectIdentity(ctx, app, client, kind, creds.OAuthType, me, file.Agent.IdentityID); err != nil {
 		return err
@@ -189,6 +214,11 @@ func runConnect(cmd *cobra.Command, f *connectRunFlags) error {
 		return output.ErrAuth(err.Error())
 	}
 	agentID := me.ID
+	lock, err := acquireConnectLock(stateDir, account, agentID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Release() }()
 
 	policy, err := file.Policy(agentID)
 	if err != nil {
@@ -196,26 +226,12 @@ func runConnect(cmd *cobra.Command, f *connectRunFlags) error {
 	}
 	policy.Buckets = buckets
 
-	stateDir, err := connectStateDir(file, f.shadow)
-	if err != nil {
-		return output.ErrUsage("The connector's state directory cannot be used: " + err.Error())
-	}
-	lock, err := connector.AcquireInstanceLock(stateDir, account, agentID, time.Now())
-	if err != nil {
-		if errors.Is(err, connector.ErrAlreadyRunning) {
-			return &output.Error{Code: output.CodeLockUnavailable, Message: err.Error()}
-		}
-		return err
-	}
-	defer func() { _ = lock.Release() }()
-
 	ledger, err := connector.OpenLedger(filepath.Join(stateDir, connector.LedgerFile))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = ledger.Close() }()
 
-	logger := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
 	if f.hold {
 		// Before intake starts: nothing this run admits may dispatch ahead of
 		// the marker.
@@ -237,7 +253,7 @@ func runConnect(cmd *cobra.Command, f *connectRunFlags) error {
 	if err != nil {
 		return err
 	}
-	live, err := eventfeed.NewLive(&basecamp.Config{BaseURL: app.Config.BaseURL}, tokens, account, eventfeed.AccountLane, connectSDKOptions()...)
+	live, err := eventfeed.NewLive(&basecamp.Config{BaseURL: app.Config.BaseURL}, &feedTokens{managerTokens: *tokens, log: func(line string) { logger.Warn(line) }}, account, eventfeed.AccountLane, connectSDKOptions()...)
 	if err != nil {
 		return err
 	}
@@ -352,10 +368,8 @@ func runConnect(cmd *cobra.Command, f *connectRunFlags) error {
 	sig := received
 	mu.Unlock()
 	switch {
-	case sig == os.Interrupt || sig == syscall.SIGINT:
-		return output.ErrInterrupted("connector interrupted")
-	case sig == syscall.SIGTERM:
-		return output.ErrTerminated("connector terminated")
+	case sig != nil:
+		return connectStoppedBySignal(sig)
 	case firstErr != nil:
 		var err error
 		refused := func() bool { return confirmAgentRefused(context.WithoutCancel(ctx), app, kind, name) }
@@ -384,6 +398,44 @@ func connectorStoppedBy(err error, agent, profile string, refused func() bool) (
 	}
 	e := errAgentDisconnected(agent, profile)
 	return connector.ConnectionDisconnected, e.Message, e
+}
+
+// acquireConnectLock takes the connector's instance lock for the run, or
+// says another connector for this agent already holds it.
+func acquireConnectLock(stateDir, account string, agentID int64) (*connector.InstanceLock, error) {
+	lock, err := connector.AcquireInstanceLock(stateDir, account, agentID, time.Now())
+	if errors.Is(err, connector.ErrAlreadyRunning) {
+		return nil, &output.Error{Code: output.CodeLockUnavailable, Message: err.Error()}
+	}
+	return lock, err
+}
+
+// connectLockFree reports, by taking and at once releasing it, whether the
+// instance lock is free: the start's look before it waits for a token.
+func connectLockFree(stateDir, account string, agentID int64) error {
+	lock, err := acquireConnectLock(stateDir, account, agentID)
+	if err != nil {
+		return err
+	}
+	return lock.Release()
+}
+
+// connectStartFailure is what a start that could not learn who it is exits
+// with. Stopped by a signal, or because ctx itself ended, it says so as it
+// is; a request's own timeout is not the connector stopping.
+// Disconnected while the connector wasn't running, it is said the way a
+// running connector says it, with no name, since reading it failed.
+// Anything else is a failure to read who the profile is.
+func connectStartFailure(ctx context.Context, kind, profile string, err error) error {
+	var e *output.Error
+	switch {
+	case ctx.Err() != nil,
+		errors.As(err, &e) && (e.Code == output.CodeTerminated || e.Code == output.CodeInterrupted):
+		return err
+	case agentDisconnectedAtStart(kind, err):
+		return errAgentDisconnected("", profile)
+	}
+	return output.ErrAuth(fmt.Sprintf("Could not read who profile %q is: %s", profile, setup.ErrorText(err)))
 }
 
 // agentDisconnectedAtStart reports whether the connector's first read of who

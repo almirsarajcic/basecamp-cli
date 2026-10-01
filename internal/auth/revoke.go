@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -224,14 +225,18 @@ func transportFailure(msg string, cause error) error {
 // statusFailure is a revocation request the server answered with something
 // other than 200, classified the way the SDK classifies any other response:
 // 429 is a rate limit (retryable, with its Retry-After), 507 an account
-// limit (a verdict, not retryable), any other 5xx retryable, the rest final.
+// limit (a verdict, not retryable), any other 5xx retryable (with its
+// Retry-After, when it names one), the rest final.
 func statusFailure(msg string, resp *http.Response) error {
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests:
-		retryAfter, _ := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After")))
+		retryAfter := retryAfterSeconds(resp.Header.Get("Retry-After"), time.Now())
 		e := output.ErrRateLimit(retryAfter)
 		e.Message = msg
 		e.HTTPStatus = resp.StatusCode
+		if retryAfter > 0 {
+			e.Cause = retryAfterError(retryAfter)
+		}
 		return e
 	case http.StatusInsufficientStorage:
 		e := output.ErrAPI(resp.StatusCode, msg)
@@ -240,8 +245,78 @@ func statusFailure(msg string, resp *http.Response) error {
 	default:
 		e := output.ErrAPI(resp.StatusCode, msg)
 		e.Retryable = resp.StatusCode >= 500 && resp.StatusCode < 600
+		// A 503 may name its wait as surely as a 429; a retryable answer
+		// carries it the same way.
+		if retryAfter := retryAfterSeconds(resp.Header.Get("Retry-After"), time.Now()); e.Retryable && retryAfter > 0 {
+			e.Cause = retryAfterError(retryAfter)
+		}
 		return e
 	}
+}
+
+// retryAfterError is a 429's Retry-After, in seconds, carried as the cause of
+// the rate limit statusFailure builds: output.Error has no field for it, and
+// a caller that reschedules the work itself needs the number, not the hint.
+type retryAfterError int
+
+func (s retryAfterError) Error() string { return fmt.Sprintf("retry after %d seconds", int(s)) }
+
+// maxRetryAfterSeconds bounds a Retry-After to what an int holds on every
+// platform; the SDK applies its own, tighter bound to whatever it is handed.
+const maxRetryAfterSeconds = math.MaxInt32
+
+// retryAfterSeconds is the wait a Retry-After header asks for, in either
+// RFC 9110 form — a count of seconds or an HTTP date, rounded up — and zero
+// when it asks for nothing this can read. A count too large to hold is held
+// at the bound rather than read as no wait at all.
+func retryAfterSeconds(value string, now time.Time) int {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+		if seconds > maxRetryAfterSeconds {
+			return maxRetryAfterSeconds
+		}
+		return int(seconds)
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0
+	}
+	seconds := math.Ceil(when.Sub(now).Seconds())
+	switch {
+	case seconds <= 0:
+		return 0
+	case seconds > maxRetryAfterSeconds:
+		return maxRetryAfterSeconds
+	}
+	return int(seconds)
+}
+
+// namedWaitError is the wait a server asked for, in seconds, when what is
+// waited is less: a 429 held for the cap rather than for all it named.
+type namedWaitError int
+
+func (s namedWaitError) Error() string {
+	return fmt.Sprintf("the server asked to wait %d seconds", int(s))
+}
+
+// NamedWait is the wait, in seconds, the server itself named for err: more
+// than RetryAfter when the wait was capped, the same otherwise.
+func NamedWait(err error) int {
+	var s namedWaitError
+	if errors.As(err, &s) {
+		return int(s)
+	}
+	return RetryAfter(err)
+}
+
+// RetryAfter is the wait, in seconds, a rate-limited answer named, or zero
+// when it named none.
+func RetryAfter(err error) int {
+	var s retryAfterError
+	if errors.As(err, &s) {
+		return int(s)
+	}
+	return 0
 }
 
 // discardGrant revokes a freshly minted credential the login refused to

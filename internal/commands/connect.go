@@ -4,14 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
+	surfguard "github.com/basecamp/surfguard/go"
 	"github.com/spf13/cobra"
 
 	"github.com/basecamp/basecamp-sdk/go/pkg/basecamp"
@@ -1101,8 +1105,138 @@ func asDoctorChecks(in []setup.Check) []Check {
 // managerTokens is a TokenProvider over an auth manager.
 type managerTokens struct{ mgr *auth.Manager }
 
+// AccessToken hands a client a renewal failure it can retry in the SDK's
+// own error type, so the SDK retries it as it would any 429 or 5xx; every
+// other failure is the CLI's own, as it was.
 func (t *managerTokens) AccessToken(ctx context.Context) (string, error) {
-	return t.mgr.AccessToken(ctx)
+	token, err := t.mgr.AccessToken(ctx)
+	if e := tokenFailureInSDKTerms(err); e != nil && e.Retryable && e.HTTPStatus != 0 {
+		return token, e
+	}
+	return token, err
+}
+
+// feedTokens is the token provider the event feed reads through. The feed
+// classifies a failure by the SDK's error type alone, and reads anything it
+// does not recognize its own way, so every failure is handed over already
+// classified by tokenRetry — the same rule a starting connector waits by,
+// so the two cannot drift apart.
+type feedTokens struct {
+	managerTokens
+	// log says a wait the server named past the cap, once per answer that
+	// named it; nothing is said when nil.
+	log func(string)
+}
+
+func (t *feedTokens) AccessToken(ctx context.Context) (string, error) {
+	token, err := t.mgr.AccessToken(ctx)
+	e := tokenFailureInSDKTerms(err)
+	if e == nil {
+		return token, err
+	}
+	if named, wait := serverNamedWait(err), time.Duration(e.RetryAfter)*time.Second; e.Retryable && named > wait && t.log != nil {
+		t.log(connectWaitLine(output.AsError(err).Message, named, wait))
+	}
+	return token, e
+}
+
+// tokenFailureInSDKTerms is a failed renewal as the SDK's error, classified
+// by tokenRetry, or nil when there was no failure. A retryable one keeps
+// its status and any wait it named — a 429, a 5xx — or, with no status, is
+// a network failure; the feed backs off and carries on either way. One that
+// cannot be retried carries no status at all, so the feed ends on it rather
+// than counting it toward its own authorization threshold; a refused
+// credential is still recognizable down the chain as the disconnect it is.
+// The CLI's error stays the cause, so its words are still the ones rendered.
+func tokenFailureInSDKTerms(err error) *basecamp.Error {
+	if err == nil {
+		return nil
+	}
+	asked, retryable := tokenRetry(err)
+	e := &basecamp.Error{Code: basecamp.CodeAPI, Message: err.Error(), Retryable: retryable, Cause: err}
+	if !retryable {
+		return e
+	}
+	var cliErr *output.Error
+	if errors.As(err, &cliErr) {
+		e.HTTPStatus = cliErr.HTTPStatus
+	}
+	e.RetryAfter = int(asked / time.Second)
+	switch e.HTTPStatus {
+	case http.StatusTooManyRequests:
+		e.Code = basecamp.CodeRateLimit
+	case 0:
+		e.Code = basecamp.CodeNetwork
+	}
+	return e
+}
+
+// tokenRetry is the one rule for a failed token renewal, which the running
+// feed (through feedTokens) and a starting connector both go by: whether it
+// can be retried, and the wait the endpoint named, zero when it named none.
+//
+// A response that arrived is classified by its status, whatever became of
+// its body: a 429 or a 5xx can be retried, a refusal cannot — the CLI's own
+// verdict says which. A request that got no response — a connection
+// refused, reset or dropped, a name that did not resolve, a timeout, a TLS
+// handshake or a proxy that failed — is a network failure, and is retried
+// too, a misconfigured one included: the process stays alive and says why,
+// where exiting would only have a supervisor give up sooner, knowing less.
+// Two things are never retried, because no wait changes them: a URL the
+// egress policy refused, and one the client could not send at all. The
+// wait is what the server named, never longer than auth.MaxServerWait.
+func tokenRetry(err error) (time.Duration, bool) {
+	if errors.Is(err, surfguard.ErrBlocked) || cannotBeSent(err) {
+		return 0, false
+	}
+	var cliErr *output.Error
+	switch {
+	case errors.As(err, &cliErr) && cliErr.Retryable:
+		// Exactly what the server named, never longer than the one cap,
+		// or nothing, which leaves it to the backoff: never a default
+		// wait from anywhere else.
+		return min(serverNamedWait(err), auth.MaxServerWait), true
+	case gotNoResponse(err):
+		return 0, true
+	}
+	return 0, false
+}
+
+// serverNamedWait is the wait the server named for err, as it named it:
+// the agent mint's own, or that of the SDK error an OAuth refresh carries.
+// Every SDK error down the chain is read, not only the first, since the
+// first may be this package's own capped wrapping of the one the server
+// gave. Zero when it named none.
+func serverNamedWait(err error) time.Duration {
+	seconds := auth.NamedWait(err)
+	for next := err; next != nil; {
+		var sdkErr *basecamp.Error
+		if !errors.As(next, &sdkErr) {
+			break
+		}
+		seconds = max(seconds, sdkErr.RetryAfter)
+		next = sdkErr.Cause
+	}
+	return time.Duration(max(seconds, 0)) * time.Second
+}
+
+// gotNoResponse reports a request that failed on the way, with no response
+// to classify.
+func gotNoResponse(err error) bool {
+	var urlErr *url.Error
+	var netErr net.Error
+	return errors.As(err, &urlErr) || errors.As(err, &netErr)
+}
+
+// cannotBeSent reports a request whose URL the client cannot send: not an
+// absolute http or https URL with a host. It never reached the network.
+func cannotBeSent(err error) bool {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return false
+	}
+	u, parseErr := url.Parse(urlErr.URL)
+	return parseErr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == ""
 }
 
 // connectSDKClient is the client setup reads through: no request hooks, no

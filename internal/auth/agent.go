@@ -351,14 +351,18 @@ func (m *Manager) mintAgentToken(ctx context.Context, mint *agentMint) (*oauth.T
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAgentTokenBytes+1))
-	if resp.StatusCode == http.StatusTooManyRequests && (err != nil || int64(len(body)) > maxAgentTokenBytes) {
-		// A 429's status and Retry-After are all its hold needs, and a
-		// body that could not be read must not cost the hold.
+	if resp.StatusCode != http.StatusOK && (err != nil || int64(len(body)) > maxAgentTokenBytes) {
+		// A status that arrived is the verdict even when its body could
+		// not be read, or was too large to: a 401 is still a refusal, a
+		// 429 still sets its hold from its status and Retry-After, a 5xx
+		// — a proxy's error page, say — is still retryable.
 		hold, err := m.agentMintRefusal(resp, nil, mint)
 		return nil, hold, err
 	}
 	if err != nil {
-		return nil, nil, wrapOAuthError("minting an agent token", err)
+		// Only a 200 cut short has no verdict — the token never arrived —
+		// and it is the transport failure it is.
+		return nil, nil, transportFailure("minting an agent token", err)
 	}
 	if int64(len(body)) > maxAgentTokenBytes {
 		return nil, nil, output.ErrAPI(resp.StatusCode,
@@ -482,7 +486,13 @@ func (m *Manager) agentMintRefusal(resp *http.Response, body []byte, mint *agent
 		now := m.now()
 		hold := mintHoldFor(mint, resp, detail, code, false, now)
 		if hold != nil && hold.Kind == mintHoldRateLimited {
-			return hold, holdRateLimitError(hold, now, "minting an agent token: "+detail)
+			e := holdRateLimitError(hold, now, "minting an agent token: "+detail)
+			if named := retryAfterSeconds(resp.Header.Get("Retry-After"), now); named > holdWait(hold, now) {
+				// Held for the cap; what the server asked for is kept too,
+				// so a caller can say both.
+				e.Cause = errors.Join(e.Cause, namedWaitError(named))
+			}
+			return hold, e
 		}
 		return hold, statusFailure("minting an agent token: "+detail, resp)
 	}

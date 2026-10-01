@@ -100,6 +100,12 @@ const defaultAgentRateLimitHold = 60 * time.Second
 // the safe direction to fail in.
 const maxAgentMintHold = time.Hour
 
+// MaxServerWait is the longest any wait a server names is waited, whatever
+// the status or the token path: the bound a rate-limit hold is written
+// under, so a held rate limit and every other named wait agree. A connector
+// that waited a server's word for years would be a hang, not a wait.
+const MaxServerWait = maxAgentConnectLifetime
+
 // MintHold is the token endpoint's last refusal of an agent credential's
 // client, remembered so the next mint can answer it without asking again.
 //
@@ -160,13 +166,13 @@ func mintHoldFor(mint *agentMint, resp *http.Response, detail, code string, refu
 }
 
 // rateLimitHold is how long a 429 holds the mint: its Retry-After, or
-// defaultAgentRateLimitHold when it has none, never past maxAgentMintHold.
+// defaultAgentRateLimitHold when it has none, never past MaxServerWait.
 func rateLimitHold(header http.Header, now time.Time) time.Duration {
 	wait := retryAfter(header, now)
 	if wait <= 0 {
 		wait = defaultAgentRateLimitHold
 	}
-	return min(wait, maxAgentMintHold)
+	return min(wait, MaxServerWait)
 }
 
 // ceilUnix is t in Unix seconds, rounded up: a deadline stored in whole
@@ -184,10 +190,16 @@ func holdWait(hold *MintHold, now time.Time) int {
 }
 
 // holdRateLimitError is the rate-limit error for a rate_limited hold,
-// whether the 429 that set it or a later mint it held.
+// whether the 429 that set it or a later mint it held. It carries the
+// hold's wait, read from its deadline, for a caller that reschedules the
+// mint itself (RetryAfter): one sent any sooner is answered by the hold.
 func holdRateLimitError(hold *MintHold, now time.Time, message string) *output.Error {
-	e := output.ErrRateLimit(holdWait(hold, now))
+	wait := holdWait(hold, now)
+	e := output.ErrRateLimit(wait)
 	e.Message = message
+	if wait > 0 {
+		e.Cause = retryAfterError(wait)
+	}
 	return e
 }
 
@@ -209,7 +221,7 @@ func (m *Manager) heldMint(creds *Credentials) error {
 	switch hold.Kind {
 	case mintHoldRateLimited:
 		e := holdRateLimitError(hold, now, fmt.Sprintf("Minting an agent token is held until %s: the token endpoint rate-limited the last attempt (%s)", when, hold.Detail))
-		e.Cause = errMintHeld
+		e.Cause = errors.Join(e.Cause, errMintHeld)
 		return e
 	case mintHoldRefused:
 		msg := "Minting an agent token was refused (" + hold.Detail + ")"
