@@ -251,10 +251,10 @@ basecamp <cmd> --page 1     # First page only, no auto-pagination
 | Post message | `basecamp messages create "Title" "Body" --in <project> --json` |
 | Post with @mention | `basecamp messages create "Title" "Hey @First.Last, ..." --in <project> --json` |
 | Post silently | `basecamp messages create "Title" "Body" --no-subscribe --in <project> --json` |
-| Post to chat | `basecamp chat post "Message" --in <project> --json` |
+| Post to chat | `basecamp chat post "Message" --in <project> --json` (formatted HTML: add `--content-type text/html`) |
 | List pings | `basecamp notifications --json --jq '.data.reads[]? | select(.section == "pings")'` |
 | Read ping thread | `basecamp api get "/buckets/<circle_id>/chats/<chat_id>/lines.json" --agent` |
-| Post to ping thread | `basecamp api post "/buckets/<circle_id>/chats/<chat_id>/lines.json" --data '{"content":"<p>message</p>"}' --json` |
+| Post to ping thread | `basecamp api post "/buckets/<circle_id>/chats/<chat_id>/lines.json" --data '{"content":"<div>message</div>","content_type":"text/html"}' --json` |
 | Add comment | `basecamp comments create <recording_id> "Text" --in <project> --json` |
 | Inspect comment / reply atoms | `basecamp comments show <url> --json` → `reply_target` + `mention` in `.data` |
 | List attachments | `basecamp attachments list <id\|url> --json` |
@@ -1268,10 +1268,13 @@ basecamp chat --in <project> --json           # List chats
 basecamp chat messages --in <project> --json  # List messages
 basecamp chat post "Hello!" --in <project>
 basecamp chat post "@Jane.Smith, check this" --in <project>  # With @mention (auto text/html)
+basecamp chat post "<div><strong>Deployed</strong><br>v2.3 is live</div>" --in <project> --content-type text/html  # Formatted
 basecamp chat line <line_id> --in <project>   # Show line
 basecamp chat update <line_id> "edited content" --in <project>  # Edit existing message in place
 basecamp chat delete <line_id> --in <project> --force # Delete line (permanent, not trashable; --force required)
 ```
+
+`chat post` sends plain text unless the message @mentions someone. For formatted content, pass HTML with `--content-type text/html`; without it, tags and Markdown show literally.
 
 ### Pings (Direct Messages)
 
@@ -1290,8 +1293,10 @@ basecamp api get "/buckets/<circle_id>/chats/<chat_id>/lines.json" --agent
 
 # Post a ping line.
 basecamp api post "/buckets/<circle_id>/chats/<chat_id>/lines.json" \
-  --data '{"content":"<p>Hey, quick question.</p>"}' --json
+  --data '{"content":"<div>Hey, quick question.</div>","content_type":"text/html"}' --json
 ```
+
+Always send `"content_type": "text/html"` with formatted content. Without it the line is stored as plain text: HTML tags are shown escaped, Markdown is shown literally, and multiline text renders with the quote border. (Editing it with `basecamp chat update` stores the edit as rich text.) Lines accept `div`, `h1`, `br`, `strong`, `em`, `strike`, `a href`, `pre`, `ol`, `ul`, `li`, `blockquote` and `<bc-attachment sgid>`; use `<br>` for line breaks.
 
 Ping line records include `creator.name`, `created_at`, `content` HTML, `type`, `bucket.type: "Circle"`, and attachment fields when files or voice notes are present.
 
